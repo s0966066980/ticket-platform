@@ -1,0 +1,137 @@
+name: ticket-platform
+
+x-backend-image: &backend-image
+  image: ticket-platform-backend:local
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+
+x-app-environment: &app-environment
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://ticket:ticket-local-only@postgres:5432/ticket_platform}
+  REDIS_URL: redis://redis:6379/0
+  UPLOAD_DIR: /data/uploads
+  TELEMETRY_SPOOL_DIR: /data/telemetry
+  NGINX_LOG_PATH: /data/proxy/access.jsonl
+  GATEWAY_URL: http://mock-gateway:8001
+  CALLBACK_URL: http://backend:8000/api/v1/payments/callback
+  GATEWAY_SECRET: ${GATEWAY_SECRET:-ticket-local-gateway-change-me}
+  SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@example.test}
+  SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-Admin-local-2026!}
+  SEED_USER_EMAIL: ${SEED_USER_EMAIL:-user@example.test}
+  SEED_USER_PASSWORD: ${SEED_USER_PASSWORD:-User-local-2026!}
+  SEED_VIEWER_EMAIL: ${SEED_VIEWER_EMAIL:-viewer@example.test}
+  SEED_VIEWER_PASSWORD: ${SEED_VIEWER_PASSWORD:-Viewer-local-2026!}
+  HOLD_SECONDS: ${HOLD_SECONDS:-300}
+  IDEMPOTENCY_LEASE_SECONDS: ${IDEMPOTENCY_LEASE_SECONDS:-30}
+  IDEMPOTENCY_RETENTION_HOURS: ${IDEMPOTENCY_RETENTION_HOURS:-24}
+  SNAPSHOT_TTL_SECONDS: ${SNAPSHOT_TTL_SECONDS:-600}
+  IMPORT_MAX_BYTES: ${IMPORT_MAX_BYTES:-20000000}
+  IMPORT_MAX_ROWS: ${IMPORT_MAX_ROWS:-100000}
+  IMPORT_BATCH_SIZE: ${IMPORT_BATCH_SIZE:-1000}
+  WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1}
+  GATEWAY_POLL_SECONDS: ${GATEWAY_POLL_SECONDS:-5}
+  WS_VERSION_CHECK_SECONDS: ${WS_VERSION_CHECK_SECONDS:-5}
+  WS_QUEUE_SIZE: ${WS_QUEUE_SIZE:-256}
+  METRICS_WINDOW_SECONDS: ${METRICS_WINDOW_SECONDS:-60}
+  DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Asia/Taipei}
+  ALERT_ERROR_RATE: ${ALERT_ERROR_RATE:-0.05}
+  ALERT_P95_SECONDS: ${ALERT_P95_SECONDS:-1}
+  ALERT_OUTBOX_LAG_SECONDS: ${ALERT_OUTBOX_LAG_SECONDS:-10}
+  ALERT_MIN_REQUESTS: ${ALERT_MIN_REQUESTS:-20}
+  ALERT_SUSTAIN_SECONDS: ${ALERT_SUSTAIN_SECONDS:-15}
+  TZ: UTC
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ticket_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-ticket}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ticket-local-only}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes', --appendfsync, always]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  backend:
+    <<: *backend-image
+    command: [api]
+    environment: *app-environment
+    volumes: [uploads:/data/uploads, telemetry:/data/telemetry]
+    tmpfs: [/tmp]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 3s
+      timeout: 4s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  mock-gateway:
+    <<: *backend-image
+    command: [gateway]
+    environment: *app-environment
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      interval: 3s
+      timeout: 4s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    <<: *backend-image
+    command: [worker]
+    environment: *app-environment
+    volumes: [uploads:/data/uploads, telemetry:/data/telemetry, proxy-logs:/data/proxy:ro]
+    tmpfs: [/tmp]
+    depends_on:
+      backend: {condition: service_healthy}
+      mock-gateway: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1/health]
+      interval: 3s
+      timeout: 4s
+      retries: 20
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.30-alpine
+    ports: ['${HTTP_PORT:-8080}:80']
+    volumes: [./nginx/nginx.conf:/etc/nginx/nginx.conf:ro, proxy-logs:/var/log/ticket]
+    depends_on:
+      backend: {condition: service_healthy}
+      frontend: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  uploads:
+  telemetry:
+  proxy-logs:
