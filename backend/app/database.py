@@ -37,4 +37,3 @@ def new_session() -> Session:
 
 def db_now(session: Session):
     return session.scalar(select(func.clock_timestamp()))
-
