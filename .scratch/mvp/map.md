@@ -10,3 +10,5 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 ## Decisions-so-far
 
 - Ticket 03 deployment source integrated and public CLI/config checks passed; runtime validation remains explicitly pending. See [ticket](issues/03-deployment.md).
+
+12 load_harness is independent of implementation and now claimed; 11 delivery also depends on 12.
