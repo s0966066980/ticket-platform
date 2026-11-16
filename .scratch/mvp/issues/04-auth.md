@@ -1,6 +1,6 @@
 # 04: Session revocation and role authorization
 
-Status: open
+Status: claimed
 Triage: ready-for-agent
 Blocked by: 01
 
@@ -16,4 +16,6 @@ Use tdd red-green vertical slices at approved public seams. You are not alone in
 
 ## Answer
 
-Pending.
+Implemented opaque-token login/logout/register/me, database-backed active/auth-version validation, reusable immutable Principal and role/ownership helpers, Admin user listing and role/active updates. Registration rejects privilege fields. Seed Argon2 hashes are directly compatible. Each test HTTP request now receives its own Session for later concurrent booking tests.
+
+Validation: source compilation passed. Public HTTP tests cover login/logout, expiry, privilege injection, normalized duplicates, role matrix, and immediate invalidation of multiple sessions. Actual pytest execution remains blocked by PyPI DNS dependency download; no HTTP/PG test is claimed passed. The schema is unchanged.

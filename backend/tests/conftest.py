@@ -75,7 +75,10 @@ def client(db_session):
     app = create_app()
 
     def override_session():
-        yield db_session
+        # Each concurrent HTTP request owns its own SQLAlchemy session. The
+        # db_session fixture above performs cleanup and can arrange test state.
+        with Session(get_engine(), expire_on_commit=False) as request_session:
+            yield request_session
 
     app.dependency_overrides[get_session] = override_session
     with TestClient(app) as test_client:
