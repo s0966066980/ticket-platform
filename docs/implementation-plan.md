@@ -1,6 +1,6 @@
 # MVP 實作設計草案
 
-狀態：Q1–Q18 領域決策已確認；本文件與 `core-schema.md`、`acceptance-plan.md` 是實作前最後審閱的具體工程草案，尚未建立資料庫或程式碼。
+狀態：Q1–Q18 與具體工程設計均已獲使用者確認，已授權依 implement-spec 開始開發。實作與驗證進度見 .scratch/mvp/ 的票單。
 
 需求優先序：`../goal.md` 是最終驗收依據；`../project_01.md` 是分期開發起點；已確認的澄清見 `design-interview.md`。11/18 的 MVP 里程碑與完整效能、故障驗收分開記錄，未完成項目不得宣稱通過。
 
