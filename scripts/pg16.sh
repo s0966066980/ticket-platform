@@ -51,6 +51,11 @@ case "$ACTION" in
         exit 1
       fi
     fi
+    running_port=$(sed -n '4p' "$RUNTIME/data/postmaster.pid")
+    [[ "$running_port" == "$PORT" ]] || {
+      echo "Owned cluster runs on port $running_port, not $PORT; refusing to connect to a different server." >&2
+      exit 2
+    }
     if ! "$PG_BIN/psql" -X -h 127.0.0.1 -p "$PORT" -U ticket_test -d postgres -Atc 'SELECT datname FROM pg_database' | grep -Fxq "$DB"; then
       "$PG_BIN/createdb" -h 127.0.0.1 -p "$PORT" -U ticket_test "$DB"
     fi
