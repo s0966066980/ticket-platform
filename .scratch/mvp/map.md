@@ -14,3 +14,5 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 12 load_harness is independent of implementation and now claimed; 11 delivery also depends on 12.
 
 - Ticket 01 backend foundation integrated; compile/static model-migration columns PASS, runtime dependency/PG16 checks explicitly pending. [Ticket](issues/01-foundation.md). Unlocks ticket04 auth.
+
+- Ticket 02 UI source integrated; four behavior tests, TypeScript and production build passed in integration checkout. Visual/full-backend E2E remains pending. [Ticket](issues/02-frontend.md).
