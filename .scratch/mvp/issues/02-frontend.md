@@ -1,6 +1,6 @@
 # 02: Complete React user and admin interface
 
-Status: open
+Status: claimed
 Triage: ready-for-agent
 Blocked by: none
 

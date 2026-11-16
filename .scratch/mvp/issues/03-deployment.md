@@ -1,6 +1,6 @@
 # 03: Compose and development execution tooling
 
-Status: open
+Status: claimed
 Triage: ready-for-agent
 Blocked by: none
 

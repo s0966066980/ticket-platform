@@ -1,6 +1,6 @@
 # 01: Backend foundation and approved PostgreSQL schema
 
-Status: open
+Status: claimed
 Triage: ready-for-agent
 Blocked by: none
 
