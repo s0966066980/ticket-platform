@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 import ijson
 from ijson.common import JSONError
-from sqlalchemy import Integer, Uuid, and_, column, delete, func, insert, literal, or_, select, tuple_, update, values
+from sqlalchemy import Integer, Uuid, and_, column, delete, func, insert, literal, or_, select, tuple_, update, values, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -315,6 +315,18 @@ def _mark_invalid(session, job_id, predicate, code, reason):
     session.execute(update(ImportRow).where(*matching).values(validation_state='INVALID').execution_options(synchronize_session=False))
 
 
+def _refresh_planner_statistics(session):
+    """Re-analyze the tables validation joins before planning its set-based checks.
+
+    Autovacuum may have analyzed import_rows while it held only an earlier job's
+    rows; the planner then estimates ~1 row for this job and validates with a
+    nested loop that is quadratic in the file size (a 100K-row import stalled for
+    minutes). ANALYZE samples a bounded number of pages, so this stays cheap.
+    """
+    session.execute(text('ANALYZE import_rows'))
+    session.execute(text('ANALYZE seats'))
+
+
 def _validate(session, job, *, file_duplicates=True):
     if file_duplicates:
         duplicates = select(ImportRow.zone_code, ImportRow.row_label, ImportRow.seat_number).where(
@@ -385,6 +397,7 @@ def _apply(factory, job_id, generation, mode):
         event, job = _locked_job(session, job_id, generation)
         _draft(event)
         # Revalidate at the final protected boundary, not only during parsing.
+        _refresh_planner_statistics(session)
         _validate(session, job)
         if mode == 'ALL_OR_NOTHING':
             if job.error_rows:
@@ -401,10 +414,14 @@ def _apply(factory, job_id, generation, mode):
             return
         job.phase = 'APPLYING'
         session.commit()
+    refreshed = False
     while True:
         with factory() as session:
             event, job = _locked_job(session, job_id, generation)
             _draft(event)
+            if not refreshed:
+                _refresh_planner_statistics(session)
+                refreshed = True
             # Earlier committed rows are APPLIED, so recovery never mistakes
             # the same job's own checkpointed seats for a new duplicate upload.
             _validate(session, job, file_duplicates=False)

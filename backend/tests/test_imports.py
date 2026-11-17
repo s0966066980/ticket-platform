@@ -201,3 +201,30 @@ def test_concurrent_same_file_uploads_share_one_job_and_one_durable_source(clien
     assert responses[0].json()['id'] == responses[1].json()['id']
     assert len(list(tmp_path.glob('*.bin'))) == 1
     assert run_worker() == 1
+
+
+def test_validation_stays_fast_when_planner_statistics_describe_only_an_earlier_job(client, db_session, tmp_path, monkeypatch):
+    """Regression: a 100K JSON import hung in VALIDATING for minutes during a load
+    run. Autovacuum had analyzed import_rows while it held only the previous job's
+    rows, so the planner estimated ~1 row for the new job_id and validated
+    duplicates with a nested loop (rows x rows). Validation must refresh statistics."""
+    import time
+    from sqlalchemy import text
+    activity, headers = setup_activity(client, tmp_path, monkeypatch)
+    rows = 15000
+    first = 'zone_code,row_label,seat_number\n' + ''.join(f'A,{i // 100},{i % 100}\n' for i in range(rows))
+    assert client.post(f'/api/v1/events/{activity}/seats/import', headers=headers, files={'file': ('one.csv', first.encode())}, data={'mode': 'all_or_nothing'}).status_code == 202
+    assert run_worker() == 1
+    db_session.execute(text('ANALYZE import_rows'))  # what autovacuum did between the two jobs
+    db_session.commit()
+    now = datetime.now(timezone.utc)
+    second_activity = client.post('/api/v1/events', headers=headers, json={
+        'title': 'second', 'sales_start': (now-timedelta(hours=1)).isoformat(), 'sales_end': (now+timedelta(days=1)).isoformat(),
+        'zones': [{'code': 'A', 'name': 'A', 'price_twd': 100}]}).json()['id']
+    second = 'zone_code,row_label,seat_number\n' + ''.join(f'A,{i // 100},{i % 100}\n' for i in range(rows))
+    job = client.post(f'/api/v1/events/{second_activity}/seats/import', headers=headers, files={'file': ('two.csv', second.encode())}, data={'mode': 'all_or_nothing'}).json()
+    started = time.monotonic()
+    assert run_worker() == 1
+    elapsed = time.monotonic() - started
+    assert client.get('/api/v1/imports/' + job['id'], headers=headers).json()['inserted_rows'] == rows
+    assert elapsed < 15, f'second import took {elapsed:.1f}s: validation fell back to a nested loop'
