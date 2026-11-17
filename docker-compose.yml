@@ -45,6 +45,10 @@ x-app-environment: &app-environment
 services:
   postgres:
     image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-300}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ticket_platform}
       POSTGRES_USER: ${POSTGRES_USER:-ticket}
@@ -71,7 +75,9 @@ services:
   backend:
     <<: *backend-image
     command: [api]
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      API_WORKERS: ${API_WORKERS:-4}
     volumes: [uploads:/data/uploads, telemetry:/data/telemetry]
     tmpfs: [/tmp]
     depends_on:

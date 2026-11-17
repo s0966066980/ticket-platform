@@ -1,8 +1,12 @@
+import logging
 from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 from starlette.exceptions import HTTPException
+
+LOG = logging.getLogger('ticket.errors')
 
 
 class AppError(Exception):
@@ -42,4 +46,9 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, exc: Exception):
+        # Saturated pool or lost database connection: retryable 503, not a silent 500.
+        if isinstance(exc, (PoolTimeoutError, OperationalError)):
+            LOG.warning("database unavailable request_id=%s error=%s", request.state.request_id, type(exc).__name__)
+            return error_response(request, 503, "DATABASE_UNAVAILABLE", "The service is temporarily overloaded; retry with the same key", headers={"Retry-After": "1"})
+        LOG.exception("unhandled exception request_id=%s", request.state.request_id)
         return error_response(request, 500, "INTERNAL_ERROR", "An unexpected error occurred")

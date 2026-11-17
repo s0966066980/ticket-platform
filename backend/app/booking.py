@@ -133,9 +133,12 @@ def _reserve(session: Session, principal: Principal, event_id: UUID, selection: 
             if visible >= quantity:
                 raise AppError(409, 'SEAT_CONTENTION', 'Seats are temporarily busy; retry', {'retryable': True})
             raise AppError(409, 'INSUFFICIENT_SEATS', 'The zone does not have enough available seats')
-    stream = lock_event_stream(session, event_id)  # Final protection lock.
+    # The quota row lock and the seat row locks are the protection against
+    # over-quota and double-selling. Every rejection is decided here, before the
+    # per-activity version lock, so competing buyers of one activity only
+    # serialize on the short section that assigns a version to a real change.
+    now = db_now(session)
     event = get_event(session, event_id, principal)  # Fresh SELECT + populate_existing, no Event lock.
-    now = db_now(session)  # After ALL locks, including event stream.
     if event.status != 'PUBLISHED' or not event.sales_start <= now < event.sales_end:
         raise AppError(409, 'NOT_ON_SALE', 'This activity is not currently accepting new orders')
     if any(seat.status != 'AVAILABLE' and not (seat.status == 'HELD' and seat.held_until <= now) for seat in seats):
@@ -157,6 +160,11 @@ def _reserve(session: Session, principal: Principal, event_id: UUID, selection: 
         zone = zones[seat.zone_id]
         session.add(OrderItem(order_id=order.id, event_id=event_id, seat_id=seat.id, zone_code_snapshot=zone.code, row_label_snapshot=seat.row_label, seat_number_snapshot=seat.seat_number, unit_price_twd=zone.price_twd))
     session.flush()
+    stream = lock_event_stream(session, event_id)  # Final protection lock: serializes version assignment and the deletion race.
+    event = get_event(session, event_id, principal)  # Re-read under the stream lock: a concurrent soft delete raises 404 and rolls everything back.
+    commit_now = db_now(session)  # After ALL locks, including event stream.
+    if event.status != 'PUBLISHED' or not event.sales_start <= commit_now < event.sales_end:
+        raise AppError(409, 'NOT_ON_SALE', 'This activity is not currently accepting new orders')
     emit_seat_changes(session, event_id, stream, load_seat_changes(session, changed), request_id)
     result = OperationResult(201, order_json(session, order, now=now))
     complete_key(session, record, result, order_id=order.id)
