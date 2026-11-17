@@ -194,6 +194,11 @@ class FeedHub:
         self.queue_size = max(1, queue_size)
         self.verify_interval = max(0.05, verify_interval)
         self.subscribers: dict[UUID, set[Subscription]] = {}
+        # Last version this replica knows per activity: from the handshake, from
+        # dispatched frames and from the periodic DB check. Client-requested
+        # heartbeats answer from here so 2,000 clients polling every 5 s do not
+        # become 400 DB reads per second; the periodic check stays authoritative.
+        self.versions: dict[UUID, int] = {}
         self.listener: asyncio.Task | None = None
         self.verifier: asyncio.Task | None = None
         self.listener_connected = False
@@ -228,11 +233,17 @@ class FeedHub:
         self.subscribers.clear()
 
     # -- subscriptions
-    def subscribe(self, websocket: WebSocket, event_id: UUID, token_hash: str, principal: Principal) -> Subscription:
+    def subscribe(self, websocket: WebSocket, event_id: UUID, token_hash: str, principal: Principal, version: int | None = None) -> Subscription:
         self._ensure_tasks()
         subscription = Subscription(websocket, event_id, token_hash, principal, asyncio.Queue(maxsize=self.queue_size))
         self.subscribers.setdefault(event_id, set()).add(subscription)
+        if version is not None:
+            self._note_version(event_id, version)
         return subscription
+
+    def _note_version(self, event_id: UUID, version: int) -> None:
+        if version > self.versions.get(event_id, -1):
+            self.versions[event_id] = version
 
     def unsubscribe(self, subscription: Subscription) -> None:
         group = self.subscribers.get(subscription.event_id)
@@ -240,11 +251,14 @@ class FeedHub:
             group.discard(subscription)
             if not group:
                 self.subscribers.pop(subscription.event_id, None)
+                self.versions.pop(subscription.event_id, None)
 
     def connection_count(self) -> int:
         return sum(len(group) for group in self.subscribers.values())
 
     def dispatch(self, event_id: UUID, frame: dict) -> int:
+        if isinstance(frame.get('version'), int) and event_id in self.subscribers:
+            self._note_version(event_id, frame['version'])
         delivered = 0
         for subscription in list(self.subscribers.get(event_id, ())):
             if subscription.offer(frame):
@@ -258,10 +272,11 @@ class FeedHub:
         self.unsubscribe(subscription)
         subscription.wake(CLOSE_RESYNC)
 
-    async def heartbeat(self, event_id: UUID, subscription: Subscription | None = None) -> None:
-        version = await asyncio.to_thread(read_version, event_id)
+    async def heartbeat(self, event_id: UUID, subscription: Subscription | None = None, *, from_db: bool = True) -> None:
+        version = await asyncio.to_thread(read_version, event_id) if from_db else self.versions.get(event_id)
         if version is None:
             return
+        self._note_version(event_id, version)
         frame = {'type': 'heartbeat', 'version': version}
         targets = [subscription] if subscription is not None else list(self.subscribers.get(event_id, ()))
         for target in targets:
@@ -361,7 +376,7 @@ async def serve_subscriber(websocket: WebSocket, event_id: UUID, connection_delt
         await websocket.close(code=CLOSE_UNAUTHENTICATED if exc.status_code == 401 else CLOSE_NOT_FOUND)
         return
     hub = get_hub(websocket.app)
-    subscription = hub.subscribe(websocket, event_id, token_digest(token), principal)
+    subscription = hub.subscribe(websocket, event_id, token_digest(token), principal, version)
     if not await hub.wait_connected():
         LOG.warning('Seat feed Redis listener not connected; heartbeats will drive resync')
     if connection_delta is not None:
@@ -379,7 +394,7 @@ async def serve_subscriber(websocket: WebSocket, event_id: UUID, connection_delt
             except ValueError:
                 continue
             if isinstance(request, dict) and request.get('type') == 'heartbeat':
-                await hub.heartbeat(event_id, subscription)
+                await hub.heartbeat(event_id, subscription, from_db=False)
     except Exception:
         pass
     finally:
