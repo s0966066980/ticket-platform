@@ -1,6 +1,6 @@
 # DESIGN：設計問答、假設、替代方案與驗證
 
-所有檔案行號對應 `main` 上的程式（最後一次程式變更為 commit `b246012`；之後只有文件 commit，不改變行號）。壓測數字來自 `LOADTEST.md` 所記錄的實際執行；本文件不含未執行的數字。
+所有檔案行號對應 `main` 上的程式（最後一次程式變更為 commit `60c9a40`；之後只有文件 commit，不改變行號）。壓測數字來自 `LOADTEST.md` 所記錄的實際執行；本文件不含未執行的數字。
 
 ## 設計假設、替代方案與取捨總覽
 
@@ -19,20 +19,20 @@
 
 ### 1. 「指定座位購買」從 API 到提交的路徑
 
-入口 `POST /api/v1/events/{event_id}/bookings`（`backend/app/api/bookings.py:32-40`）→ `reserve_order`（`backend/app/booking.py:190`）→ `_reserve`（`backend/app/booking.py:133`）。一次 HTTP 請求對應一個 PostgreSQL 交易（READ COMMITTED），流程與保護點如下：
+入口 `POST /api/v1/events/{event_id}/bookings`（`backend/app/api/bookings.py:32-40`）→ `reserve_order`（`backend/app/booking.py:194`）→ `_reserve`（`backend/app/booking.py:137`）。一次 HTTP 請求對應一個 PostgreSQL 交易（READ COMMITTED），流程與保護點如下：
 
 | 步驟 | 位置 | 動作 | 保護 |
 | --- | --- | --- | --- |
-| 1 | `booking.py:194-196` | `claim_key`：在獨立短交易以 `INSERT … ON CONFLICT DO NOTHING` 取得冪等處理資格（`idempotency.py:52-95`） | 唯一鍵 `(user_id, operation, key)`；同 key 只會有一個處理者 |
-| 2 | `booking.py:136` | `lock_claim`：主交易 `SELECT … FOR UPDATE` 冪等列並驗證 generation | **保護開始**：冪等列鎖 |
-| 3 | `booking.py:136` | `lock_quota`：`INSERT … ON CONFLICT DO NOTHING` 後 `FOR UPDATE` 該帳號／活動額度列 | 同帳號同活動的所有建單／取消／付款在此序列化 |
-| 4 | `booking.py:140` | 指定座位 `SELECT … FOR UPDATE`（依 ID 排序） | 座位列鎖：競爭同座位的交易在此排隊；固定排序避免死結 |
-| 5 | `booking.py:158-166` | 讀 `clock_timestamp()`，檢查已發布且在售票時段、座位可售（AVAILABLE 或已逾時 HELD）、有效張數 + 本次 ≤ 4 | 在持有鎖的狀態下讀到的是最新提交值（READ COMMITTED + `populate_existing`） |
-| 6 | `booking.py:170-176` | 建立訂單，**條件式 UPDATE** 座位：`WHERE id IN … AND (AVAILABLE OR (HELD AND held_until <= now))` 改為 HELD；受影響列數必須等於張數 | 即使步驟 4 的鎖有任何疏漏，資料庫仍只會更新仍可售的列 |
-| 7 | `booking.py:181-182` | 回應 body 與冪等回應先準備好，`emit_seat_changes`（`booking.py:44-75`）是交易的最後一步 | 進版本鎖前所有待寫入都已 flush（`booking.py:56`） |
-| 8 | `booking.py:57` | `UPDATE event_streams … RETURNING current_version`：取得活動版本列鎖並配號 | 版本配號與軟刪除共用的最後一把鎖；每個活動的提交在此序列化 |
-| 9 | `booking.py:63-74` | 單一 CTE 在鎖下以新快照重讀活動（已刪除、未發布或不在售票時段則不寫入），寫入 `seat_events` 與 `outbox_events`；寫入 0 列即拋錯回滾 | 刪除與建單只能一邊成功 |
-| 10 | `booking.py:186` | `session.commit()` | **保護釋放**：所有列鎖在提交時釋放 |
+| 1 | `booking.py:198-200` | `claim_key`：在獨立短交易以 `INSERT … ON CONFLICT DO NOTHING` 取得冪等處理資格（`idempotency.py:52-95`） | 唯一鍵 `(user_id, operation, key)`；同 key 只會有一個處理者 |
+| 2 | `booking.py:140` | `lock_claim`：主交易 `SELECT … FOR UPDATE` 冪等列並驗證 generation | **保護開始**：冪等列鎖 |
+| 3 | `booking.py:140` | `lock_quota`：`INSERT … ON CONFLICT DO NOTHING` 後 `FOR UPDATE` 該帳號／活動額度列 | 同帳號同活動的所有建單／取消／付款在此序列化 |
+| 4 | `booking.py:144` | 指定座位 `SELECT … FOR UPDATE`（依 ID 排序） | 座位列鎖：競爭同座位的交易在此排隊；固定排序避免死結 |
+| 5 | `booking.py:162-170` | 讀 `clock_timestamp()`，檢查已發布且在售票時段、座位可售（AVAILABLE 或已逾時 HELD）、有效張數 + 本次 ≤ 4 | 在持有鎖的狀態下讀到的是最新提交值（READ COMMITTED + `populate_existing`） |
+| 6 | `booking.py:174-180` | 建立訂單，**條件式 UPDATE** 座位：`WHERE id IN … AND (AVAILABLE OR (HELD AND held_until <= now))` 改為 HELD；受影響列數必須等於張數 | 即使步驟 4 的鎖有任何疏漏，資料庫仍只會更新仍可售的列 |
+| 7 | `booking.py:185-186` | 回應 body 與冪等回應先準備好，`emit_seat_changes`（`booking.py:45-76`）是交易的最後一步 | 進版本鎖前所有待寫入都已 flush（`booking.py:57`） |
+| 8 | `booking.py:58` | `UPDATE event_streams … RETURNING current_version`：取得活動版本列鎖並配號 | 版本配號與軟刪除共用的最後一把鎖；每個活動的提交在此序列化 |
+| 9 | `booking.py:64-75` | 單一 CTE 在鎖下以新快照重讀活動（已刪除、未發布或不在售票時段則不寫入），寫入 `seat_events` 與 `outbox_events`；寫入 0 列即拋錯回滾 | 刪除與建單只能一邊成功 |
+| 10 | `booking.py:190` | `session.commit()` | **保護釋放**：所有列鎖在提交時釋放 |
 
 保護機制：PostgreSQL 列鎖（`FOR UPDATE`）序列化對同一座位、同一帳號額度、同一活動版本的寫入；條件式 UPDATE 的 `WHERE` 子句是最後防線——它只會把「此刻仍可售」的列改成 HELD，更新列數不足就整筆回滾。保證的是：任一座位在任一時刻最多屬於一筆有效訂單（`seats.current_order_id`），且成交明細有 `UNIQUE(seat_id) WHERE sold_at IS NOT NULL`（`backend/app/models.py:162-180`）作為成交層的防線。
 
@@ -45,7 +45,7 @@
 | t0 | 取得冪等列、額度列、座位 S 的鎖 | 同 key 重送：`claim_key` 看到 IN_PROGRESS 且租約未到 → 回 409 IDEMPOTENCY_IN_PROGRESS | S 鎖在 A |
 | t1 | 條件式 UPDATE S → HELD；commit 成功，但回應在網路上遺失 | | S.current_order_id = 訂單 A |
 | t2 | | 客戶端再以同 key 重送：`claim_key` 看到 COMPLETED → 重播原 201 與原訂單（`idempotency.py:74`） | 不再建立 |
-| t2' | | 若改用**不同帳號**的請求：取得 S 的鎖後讀到 HELD 且 `held_until > now` → 409 SEAT_UNAVAILABLE（`booking.py:162-163`）；就算檢查被繞過，條件式 UPDATE 影響 0 列 → 409（`booking.py:175`） | S 不變 |
+| t2' | | 若改用**不同帳號**的請求：取得 S 的鎖後讀到 HELD 且 `held_until > now` → 409 SEAT_UNAVAILABLE（`booking.py:166-167`）；就算檢查被繞過，條件式 UPDATE 影響 0 列 → 409（`booking.py:179`） | S 不變 |
 
 另一個順序：A 在 t0 取得鎖後被暫停 30 秒。B 在座位鎖上等待（不會超時，PostgreSQL 無 lock timeout 設定），A 恢復後提交，B 才取得鎖並讀到最新狀態 → 拒絕。如果 A 的連線被資料庫斷掉（例如 `kill -9` A），交易回滾、鎖釋放，B 正常成立；A 的冪等列租約 30 秒後到期可被重試接手（generation +1，`idempotency.py:89`），舊處理者若還活著，`lock_claim` 會因 generation 不符而拒絕（`idempotency.py:99`）。我找不到在這個實作下能讓兩筆有效訂單指向同一座位的交錯；條件式 UPDATE 的列數檢查是獨立於鎖的第二道保證。
 
@@ -57,8 +57,8 @@
 
 破壞方式（在隔離工作樹與拋棄式資料庫進行，完成後 `git checkout` 還原；正式程式未動）：
 
-1. `booking.py:140` 移除 `.with_for_update()`（先讀後寫）。
-2. `booking.py:174` 把條件式 UPDATE 的 `_eligible(now)` 述詞移除（無條件更新）。
+1. `booking.py:144` 移除 `.with_for_update()`（先讀後寫）。
+2. `booking.py:178` 把條件式 UPDATE 的 `_eligible(now)` 述詞移除（無條件更新）。
 
 實際輸出（2026-11-17，PostgreSQL 16.11 容器）：
 
@@ -79,8 +79,8 @@ E         At index 1 diff: 201 != 409
 | # | 時間窗 | 已改的資料 | 還不知道的部分 | 收斂機制 |
 | --- | --- | --- | --- | --- |
 | W1 | 訂單／座位已提交，Outbox 尚未發布 | `seats`、`orders`、`outbox_events` | WebSocket 訂閱者 | worker `publish_outbox`（`backend/app/feed.py:87`）每 0.25 秒掃描；客戶端 5 秒版本核對 |
-| W2 | 付款嘗試已建立，worker 已向金流扣款，回呼尚未送達 | `payments.PENDING`、`gateway.charges` | 訂單仍 PENDING_PAYMENT | 金流持久化回呼並重試（`backend/app/gateway.py:146`）；`reconcile_payments` 每 GATEWAY_POLL_SECONDS 查帳（`backend/app/payments.py:328`） |
-| W3 | 鎖位期限已過，訂單仍是 PENDING_PAYMENT | 時間 | `orders.status`、`seats.status` 仍顯示 HELD | 業務上立即視為逾時（新訂單可接手，`booking.py:116-117`）；worker `expire_due_orders` 每秒收斂（`booking.py:260`） |
+| W2 | 付款嘗試已建立，worker 已向金流扣款，回呼尚未送達 | `payments.PENDING`、`gateway.charges` | 訂單仍 PENDING_PAYMENT | 金流持久化回呼並重試（`backend/app/gateway.py:201`）；`reconcile_payments` 每 GATEWAY_POLL_SECONDS 查帳（`backend/app/payments.py:350`） |
+| W3 | 鎖位期限已過，訂單仍是 PENDING_PAYMENT | 時間 | `orders.status`、`seats.status` 仍顯示 HELD | 業務上立即視為逾時（新訂單可接手，`booking.py:120-121`）；worker `expire_due_orders` 每秒收斂（`booking.py:264`） |
 | W4 | 匯入批次與 checkpoint 已提交，worker 中止 | `seats`、`import_jobs.checkpoint` | job 仍 RUNNING、租約未釋放 | 租約到期後其他 worker 以新 generation 接手，不重做已提交批次（`backend/app/imports.py:162-188`） |
 | W5 | 遙測已 XADD 到 Redis，尚未落 PostgreSQL | Redis Stream | `access_logs`、`system_metrics` | collector 先 commit 再 XACK（`backend/app/observability.py:566`）；pending entries 由 `XAUTOCLAIM` 接手 |
 
@@ -90,8 +90,8 @@ E         At index 1 diff: 201 != 409
 
 假設 backend 在 worker 已呼叫金流 `POST /charges`、金流已持久化 SUCCESS、回呼尚未送達時被 `kill -9`，或 worker 在 `_finish_job` 前被殺：
 
-1. 金流端：`gateway.charges` 的 `callback_delivered_at` 為空，背景投遞迴圈以租約／generation 領取並重試（指數退避，上限 60 秒），直到 backend 回 2xx（`gateway.py:146-190`）。
-2. backend 重啟後：回呼進入 `process_callback`（`payments.py:153`），依固定順序鎖額度→訂單→付款→座位→版本列，再讀 DB 時間（`payments.py:182-183`）。若訂單仍在期限內且座位仍屬該訂單 → PAID；若已逾時／被接手 → 訂單收斂為 EXPIRED／保持終止，付款標為 `REVERSAL_PENDING` 並寫入沖正 Outbox（`payments.py:218`），worker 以 `provider_charge_id` 為冪等鍵向金流沖正。
+1. 金流端：`gateway.charges` 的 `callback_delivered_at` 為空，背景投遞迴圈以租約／generation 領取並重試（指數退避，上限 60 秒），直到 backend 回 2xx（`gateway.py:147-212`）。
+2. backend 重啟後：回呼進入 `process_callback`（`payments.py:154`），依固定順序鎖額度→訂單→付款→座位→版本列，再讀 DB 時間（`payments.py:183-184`）。若訂單仍在期限內且座位仍屬該訂單 → PAID；若已逾時／被接手 → 訂單收斂為 EXPIRED／保持終止，付款標為 `REVERSAL_PENDING` 並寫入沖正 Outbox（`payments.py:219`），worker 以 `provider_charge_id` 為冪等鍵向金流沖正。
 3. 若回呼也遺失：`reconcile_payments` 以簽章 GET 查帳並重播相同回呼內容（測試 `test_reconciliation_recovers_a_lost_callback`）。
 4. Outbox 中的 `payment_requested` 工作若在 `_finish_job` 前被殺：租約 30 秒後到期，另一 worker 重新領取；金流以 `payment_key = payment_id` 冪等，回原 charge（測試 `test_two_workers_do_not_double_execute_payment_jobs`）。
 
@@ -99,13 +99,13 @@ E         At index 1 diff: 201 != 409
 
 ### 3. 逾時判斷使用哪一個時鐘
 
-資料庫時鐘 `clock_timestamp()`，且在取得必要的額度、訂單與座位列鎖之後才讀（`booking.py:158`、`booking.py:232`、`payments.py:183`）；版本區段內的售票時段檢查直接在 SQL 以 `clock_timestamp()` 判斷（`booking.py:62`）。理由：期限由資料庫時間寫入（`expires_at = now + HOLD_SECONDS`），比較也用同一來源，多個 API／worker 副本的 OS 時鐘偏差不影響；`now()` 固定於交易起點，等鎖期間可能已過期，所以用 `clock_timestamp()`。
+資料庫時鐘 `clock_timestamp()`，且在取得必要的額度、訂單與座位列鎖之後才讀（`booking.py:162`、`booking.py:236`、`payments.py:184`）；版本區段內的售票時段檢查直接在 SQL 以 `clock_timestamp()` 判斷（`booking.py:63`）。理由：期限由資料庫時間寫入（`expires_at = now + HOLD_SECONDS`），比較也用同一來源，多個 API／worker 副本的 OS 時鐘偏差不影響；`now()` 固定於交易起點，等鎖期間可能已過期，所以用 `clock_timestamp()`。
 
 不 `sleep` 的測試方式：直接用 SQL 把 `orders.expires_at`／`seats.held_until` 改成過去（`backend/tests/test_worker.py:40-56`、`test_payments.py:281`、`test_booking.py:120`、`test_auth.py:87` 對 session 到期同樣處理）。時鐘不一致：應用程式不以自己的時鐘判斷期限，所以沒有「應用時鐘偏差」路徑可測；監控管線的時鐘偏差由 `test_unanchored_replica_clock_is_flagged_not_silently_misplaced`（`test_observability.py:291`）覆蓋。
 
 ### 4. 同一筆逾時工作被兩個 worker 同時執行
 
-結果仍正確。`expire_due_orders`（`booking.py:260`）只做無鎖的候選查詢，每筆再呼叫 `_finalize_pending`：先鎖額度列、再 `SELECT … FOR UPDATE` 訂單（`booking.py:223-224`），讀到 `status != 'PENDING_PAYMENT'` 就直接回傳（`booking.py:225-230`），座位釋放的 UPDATE 另外限定 `current_order_id = 該訂單 AND status = 'HELD'`（`booking.py:245`）。第二個 worker 要嘛等鎖後看到終態、要嘛更新 0 列。付款工作則靠 Outbox 列的 `FOR UPDATE SKIP LOCKED` 領取與 generation 檢查（`payments.py:248`、`payments.py:263`），測試 `test_two_workers_do_not_double_execute_payment_jobs`（`test_payments.py:535`）。
+結果仍正確。`expire_due_orders`（`booking.py:264`）只做無鎖的候選查詢，每筆再呼叫 `_finalize_pending`：先鎖額度列、再 `SELECT … FOR UPDATE` 訂單（`booking.py:227-228`），讀到 `status != 'PENDING_PAYMENT'` 就直接回傳（`booking.py:229-234`），座位釋放的 UPDATE 另外限定 `current_order_id = 該訂單 AND status = 'HELD'`（`booking.py:249`）。第二個 worker 要嘛等鎖後看到終態、要嘛更新 0 列。付款工作則靠 Outbox 列的 `FOR UPDATE SKIP LOCKED` 領取與 generation 檢查（`payments.py:249`、`payments.py:264`），測試 `test_two_workers_do_not_double_execute_payment_jobs`（`test_payments.py:554`）。
 
 ## Q3 重試、冪等與限購
 
@@ -115,7 +115,7 @@ E         At index 1 diff: 201 != 409
 
 | 情況 | 回傳 | 位置與原因 |
 | --- | --- | --- |
-| 第一次已成功 | 重播原 HTTP 狀態與 body（同一訂單 ID） | `idempotency.py:74`、`:84`：冪等列與訂單在同一交易提交（`booking.py:182-186`），所以「DB 已提交但回應遺失」也會得到原結果 |
+| 第一次已成功 | 重播原 HTTP 狀態與 body（同一訂單 ID） | `idempotency.py:74`、`:84`：冪等列與訂單在同一交易提交（`booking.py:186-190`），所以「DB 已提交但回應遺失」也會得到原結果 |
 | 第一次仍在處理中 | 409 `IDEMPOTENCY_IN_PROGRESS`，附 `Retry-After: 1` | `idempotency.py:76`、`:87`：租約（30 秒）未到期；租約到期則接手並 generation +1（`:89`），舊處理者在 `lock_claim` 被拒（`:99`） |
 | 相同 key、不同內容 | 409 `IDEMPOTENCY_KEY_REUSED` | `idempotency.py:73`：正規化後的請求雜湊不同 |
 
@@ -123,17 +123,17 @@ E         At index 1 diff: 201 != 409
 
 ### 2. 同時以兩個 key 送 3 + 2 張
 
-限購檢查與寫入在同一個交易內：`lock_quota` 取得額度列鎖（`booking.py:136`）→ 權威求和（`booking.py:164`：PAID + 未逾時 PENDING_PAYMENT）→ 建單與座位 UPDATE（`booking.py:170-176`）→ commit（`booking.py:186`）。兩個請求在額度列鎖上序列化：第一個提交後，第二個才做求和，看到 3 → 3 + 2 > 4 → 409 `QUOTA_EXCEEDED`。若檢查與寫入不在同一交易（例如先用一個交易檢查、再開一個交易寫入），兩個請求都會讀到 0 並各自成立，合計 5 張。測試：`test_booking.py:67` `test_concurrent_different_keys_cannot_exceed_account_quota`（屏障同步的 3 + 2 與 4 + 4）。
+限購檢查與寫入在同一個交易內：`lock_quota` 取得額度列鎖（`booking.py:140`）→ 權威求和（`booking.py:168`：PAID + 未逾時 PENDING_PAYMENT）→ 建單與座位 UPDATE（`booking.py:174-180`）→ commit（`booking.py:190`）。兩個請求在額度列鎖上序列化：第一個提交後，第二個才做求和，看到 3 → 3 + 2 > 4 → 409 `QUOTA_EXCEEDED`。若檢查與寫入不在同一交易（例如先用一個交易檢查、再開一個交易寫入），兩個請求都會讀到 0 並各自成立，合計 5 張。測試：`test_booking.py:67` `test_concurrent_different_keys_cannot_exceed_account_quota`（屏障同步的 3 + 2 與 4 + 4）。
 
 ### 3. 配位在哪裡挑選
 
-在資料庫內：`SELECT … WHERE zone = ? AND 可售 ORDER BY id LIMIT n FOR UPDATE SKIP LOCKED`（`booking.py:148`）。暴露問題的並行情境：兩個帳號同時對同一區域各要 2 張，剩 3 席——若讀到應用程式記憶體再挑選，兩者會挑到相同的前 2 席，一方的條件式 UPDATE 會影響 0 列而失敗（或在無條件更新下超賣）；`SKIP LOCKED` 讓第二個交易直接跳過被鎖的席位，拿到不同的席位或在不足時回 409（區分 `SEAT_CONTENTION` 可重試與 `INSUFFICIENT_SEATS`，`booking.py:149-153`）。測試：`test_booking.py:82` `test_region_allocation_is_full_and_distinct_across_accounts`。
+在資料庫內：`SELECT … WHERE zone = ? AND 可售 ORDER BY id LIMIT n FOR UPDATE SKIP LOCKED`（`booking.py:152`）。暴露問題的並行情境：兩個帳號同時對同一區域各要 2 張，剩 3 席——若讀到應用程式記憶體再挑選，兩者會挑到相同的前 2 席，一方的條件式 UPDATE 會影響 0 列而失敗（或在無條件更新下超賣）；`SKIP LOCKED` 讓第二個交易直接跳過被鎖的席位，拿到不同的席位或在不足時回 409（區分 `SEAT_CONTENTION` 可重試與 `INSUFFICIENT_SEATS`，`booking.py:153-157`）。測試：`test_booking.py:82` `test_region_allocation_is_full_and_distinct_across_accounts`。
 
 ## Q4 即時推送
 
 ### 1. 從提交到所有訂閱者的路徑與順序
 
-1. 交易內：`UPDATE event_streams … RETURNING current_version` 取得活動版本列鎖並配號，同一交易寫入 `seat_events` 與 `outbox_events`（`booking.py:44-75`，由購票、取消／逾時與付款成交共用：`booking.py:185`、`:244`、`payments.py:222`）。版本號只在持有 `event_streams` 列鎖時分配且與座位變更同交易提交，因此**同一活動的提交順序 = 版本順序**，由資料庫保證。
+1. 交易內：`UPDATE event_streams … RETURNING current_version` 取得活動版本列鎖並配號，同一交易寫入 `seat_events` 與 `outbox_events`（`booking.py:45-76`，由購票、取消／逾時與付款成交共用：`booking.py:189`、`:251`、`payments.py:223`）。版本號只在持有 `event_streams` 列鎖時分配且與座位變更同交易提交，因此**同一活動的提交順序 = 版本順序**，由資料庫保證。
 2. worker `publish_outbox`（`feed.py:87-101`）→ `_publish_event`（`feed.py:50-84`）：以交易層 advisory lock（`feed.py:60`）確保同一活動同時只有一個發布者，依 `aggregate_version` 排序 `PUBLISH seat:{event_id}`（`feed.py:70`），成功後標記 `published_at`（`feed.py:76`）並推進 `published_version`。
 3. 每個 API 副本的 `FeedHub._listen`（`feed.py:317`）`PSUBSCRIBE seat:*`，解析後 `dispatch` 到該活動的每條連線佇列，`pump` 依佇列順序送出。
 4. 瀏覽器只套用 `version == last + 1`，忽略 ≤ last，跳號則重取快照（`frontend/src/EventDetail.tsx` 的 `onmessage`）。
@@ -155,7 +155,7 @@ E         At index 1 diff: 201 != 409
 
 ### 4. 情境 B 實測
 
-實際執行（`LOADTEST.md` 情境 B，commit eba5cc2）：2,000 條經 Nginx 的 WebSocket 連線全部完成握手並存活 61 秒；80 次真實座位變更每一次都在 0.29 秒內送達全部 2,000 條連線，共 160,000 次送達、0 次未送達；送達延遲 p50 248 ms、p95 273 ms、p99 283 ms（HTTP 送出到收到 frame，客戶端單調時鐘）；伺服器推送約 3,017 frames/s；重同步 0、斷線 0；穩態 backend 平均 16.5% 單核、記憶體最高 547 MiB；結束後一致性稽核 0 違規。延遲主要來自 0.25 秒的 Outbox 輪詢。第一次執行暴露了 heartbeat 以 `current_version` 回報造成的誤判重同步，已修正為 `published_version`（見 `LOADTEST.md`）。
+實際執行（`LOADTEST.md` 情境 B，commit 8b29aea）：2,000 條經 Nginx 的 WebSocket 連線全部完成握手並存活 61 秒；80 次真實座位變更每一次都在 0.29 秒內送達全部 2,000 條連線，共 160,000 次送達、0 次未送達；送達延遲 p50 248 ms、p95 273 ms、p99 283 ms（HTTP 送出到收到 frame，客戶端單調時鐘）；伺服器推送約 3,017 frames/s；重同步 0、斷線 0；穩態 backend 平均 16.5% 單核、記憶體最高 547 MiB；結束後一致性稽核 0 違規。延遲主要來自 0.25 秒的 Outbox 輪詢。第一次執行暴露了 heartbeat 以 `current_version` 回報造成的誤判重同步，已修正為 `published_version`（見 `LOADTEST.md`）。
 
 ## Q5 權限與憑證失效
 
