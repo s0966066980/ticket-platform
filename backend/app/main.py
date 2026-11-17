@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api import register_routers
 from app.database import get_engine
 from app.errors import AppError, register_error_handlers
+from app.observability import install_observability
 
 REQUEST_ID = ContextVar("request_id", default=None)
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
         return {"status": "ready"}
 
     register_routers(app)
+    install_observability(app)
     return app
 
 
