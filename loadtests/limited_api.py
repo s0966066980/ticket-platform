@@ -12,6 +12,8 @@ def main():
     args=parser.parse_args()
     limit=512*1024*1024
     resource.setrlimit(resource.RLIMIT_AS,(limit,limit))
-    os.execv(sys.executable,[sys.executable,'-m','uvicorn','app.main:app','--host','127.0.0.1','--port',str(args.port),'--workers','1'])
+    # No --workers flag: with it uvicorn becomes a supervisor whose child does the
+    # export, and the measured PID would be the wrong process.
+    os.execv(sys.executable,[sys.executable,'-m','uvicorn','app.main:app','--host','127.0.0.1','--port',str(args.port)])
 
 if __name__=='__main__':main()

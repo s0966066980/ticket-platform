@@ -111,7 +111,7 @@ def _write_summary(connection, sheet, event, generated_at):
         _append(sheet, row)
 
 
-def _write_zones(connection, sheet, event_id):
+def _write_zones(connection, sheet, event_id, generated_at):
     sold = select(
         OrderItem.zone_code_snapshot.label('code'),
         func.count(OrderItem.id).label('tickets'),
@@ -125,7 +125,7 @@ def _write_zones(connection, sheet, event_id):
     ).outerjoin(sold, sold.c.code == Zone.code).where(Zone.event_id == event_id).order_by(Zone.code)
     with connection.execution_options(yield_per=BATCH_SIZE).execute(statement) as result:
         for row in result:
-            _append(sheet, row)
+            _append(sheet, (*row, generated_at))
 
 
 def _write_orders(connection, sheet, event_id):
@@ -165,8 +165,8 @@ def build_report(session: Session, event_id: UUID, principal: Principal) -> Path
                 workbook = Workbook(write_only=True)
                 summary = _sheet(workbook, 'Summary', ['項目', '數值／時間 (Asia/Taipei)'])
                 _write_summary(connection, summary, event, generated_at)
-                zones = _sheet(workbook, 'Zones', ['區域代碼', '區域名稱', '票價 TWD', '已付款張數', '票價營收 TWD（不含服務費）'])
-                _write_zones(connection, zones, event_id)
+                zones = _sheet(workbook, 'Zones', ['區域代碼', '區域名稱', '票價 TWD', '已付款張數', '票價營收 TWD（不含服務費）', '統計時間 (Asia/Taipei)'])
+                _write_zones(connection, zones, event_id, generated_at)
                 orders = _sheet(workbook, 'Orders', [
                     '訂單編號', '狀態', '建立時間 (Asia/Taipei)', '付款時間 (Asia/Taipei)',
                     '保留期限 (Asia/Taipei)', '張數', '票價小計 TWD', '服務費 TWD', '總額 TWD', '幣別',

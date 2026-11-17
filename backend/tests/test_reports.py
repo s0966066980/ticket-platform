@@ -113,7 +113,9 @@ def test_sales_exclude_canceled_orders_and_preserve_numeric_money_timezone_and_r
         assert summary['已付款服務費 TWD'] == 2
         assert summary['已付款總額 TWD'] == 32
         assert summary['待沖正金額 TWD'] == 16
-        assert list(workbook['Zones'].values)[1] == ('A', '測試區', 15, 2, 30)
+        zone_row = list(workbook['Zones'].values)[1]
+        assert zone_row[:5] == ('A', '測試區', 15, 2, 30)
+        assert isinstance(zone_row[5], datetime) and zone_row[5].tzinfo is None, 'snapshot time in the Asia/Taipei header timezone'
         details = {row[0]: row for row in workbook['Orders'].iter_rows(min_row=2, values_only=True)}
         row = details[str(paid.id)]
         assert row[2] == datetime(2026, 11, 17, 2, 20)
