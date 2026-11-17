@@ -201,3 +201,22 @@ def test_application_error_preserves_retry_after_and_request_id_over_http():
     assert result.headers['Retry-After']=='1'
     assert result.headers['X-Request-ID']=='retry-header-check'
     assert result.json()['request_id']=='retry-header-check'
+
+
+def test_order_list_is_newest_first_and_pages_without_gaps(client,db_session):
+    from sqlalchemy import text
+    event,seats,headers=sale(client,db_session)
+    created=[book(client,headers,event,[seat]).json()["id"] for seat in seats[:3]]
+    # Random UUIDs say nothing about age: make the smallest id the newest order.
+    base=datetime(2026,1,1,tzinfo=timezone.utc)
+    for age,identifier in enumerate(sorted(created)):
+        db_session.execute(text("UPDATE orders SET created_at=:at WHERE id=:id"),{"at":base-timedelta(minutes=age),"id":identifier})
+    db_session.commit()
+    expected=sorted(created)  # newest (smallest id) first, oldest last
+    first=client.get("/api/v1/orders?limit=2",headers=headers)
+    assert first.status_code==200
+    assert [order["id"] for order in first.json()["items"]]==expected[:2]
+    second=client.get("/api/v1/orders",headers=headers,params={"limit":2,"cursor":first.json()["next_cursor"]})
+    assert [order["id"] for order in second.json()["items"]]==expected[2:]
+    assert second.json()["next_cursor"] is None
+    assert client.get("/api/v1/orders?cursor=not-a-cursor",headers=headers).status_code==422

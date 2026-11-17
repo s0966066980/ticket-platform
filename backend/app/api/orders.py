@@ -14,7 +14,8 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 
 @router.get('')
-def orders(principal: PrincipalDep, session: SessionDep, limit: Annotated[int, Query(ge=1, le=100)] = 20, cursor: UUID | None = None):
+def orders(principal: PrincipalDep, session: SessionDep, limit: Annotated[int, Query(ge=1, le=100)] = 20, cursor: Annotated[str | None, Query(max_length=512)] = None):
+    """Own orders (all orders for Admin), newest first; next_cursor is opaque."""
     return list_orders(session, principal, limit=limit, cursor=cursor)
 
 

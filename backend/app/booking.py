@@ -4,7 +4,7 @@ from uuid import UUID
 
 import json
 
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -15,6 +15,7 @@ from app.database import db_now, new_session
 from app.errors import AppError
 from app.events import get_event
 from app.idempotency import Claim, OperationResult, claim_key, complete_key, lock_claim, prepare_claim, reject_key, release_key
+from app.pagination import encode_cursor, parse_cursor
 from app.models import Order, OrderItem, OutboxEvent, Payment, Seat, SeatEvent, UserEventQuota, Zone
 
 
@@ -101,16 +102,19 @@ def get_order(session: Session, principal: Principal, order_id: UUID) -> Order:
     return order
 
 
-def list_orders(session: Session, principal: Principal, *, limit=20, cursor: UUID | None = None) -> dict:
-    statement = select(Order).order_by(Order.id.desc()).limit(limit + 1)
+def list_orders(session: Session, principal: Principal, *, limit=20, cursor: str | None = None) -> dict:
+    """Newest first. Order ids are random UUIDs, so age comes from created_at with id as tiebreak."""
+    statement = select(Order).order_by(Order.created_at.desc(), Order.id.desc()).limit(limit + 1)
     if principal.role != 'ADMIN':
         statement = statement.where(Order.user_id == principal.id)
-    if cursor:
-        statement = statement.where(Order.id < cursor)
+    position = parse_cursor(cursor)
+    if position is not None:
+        statement = statement.where(tuple_(Order.created_at, Order.id) < position)
     records = list(session.scalars(statement))
     page = records[:limit]
     now = db_now(session)
-    return {'items': [order_json(session, record, now=now) for record in page], 'next_cursor': str(page[-1].id) if len(records) > limit else None}
+    next_cursor = encode_cursor(page[-1].created_at, page[-1].id) if len(records) > limit else None
+    return {'items': [order_json(session, record, now=now) for record in page], 'next_cursor': next_cursor}
 
 
 def _eligible(now):

@@ -17,7 +17,7 @@ This refines the approved `.scratch/mvp/spec.md` for backend integration. All JS
 | GET /api/v1/events/{id}/seats | optional zone_id → `{version,items:[{id,zone_id,row_label,seat_number,status,held_until?}]}` |
 | GET /api/v1/events/{id}/version | `{version}` |
 | POST /api/v1/events/{id}/bookings | `{seat_ids:[id]}` OR `{zone_id,quantity}`; Idempotency-Key → order |
-| GET /api/v1/orders | order collection |
+| GET /api/v1/orders | `{items:[order],next_cursor}`; own orders (all for Admin), newest `created_at` first with `id` as tiebreak; `limit` 1–100, opaque `cursor`, invalid cursor → 422 |
 | GET /api/v1/orders/{id} | order `{id,event_id,status,ticket_count,subtotal_twd,fee_twd,total_twd,expires_at,created_at,payments?:[{id,status}],items?:[{seat_id,zone_code_snapshot,row_label_snapshot,seat_number_snapshot,unit_price_twd}]}` |
 | POST /api/v1/orders/{id}/cancel | → order |
 | POST /api/v1/orders/{id}/payments | `{outcome:success|failure,delay_seconds:0}`; Idempotency-Key → payment `{id,status}` |
