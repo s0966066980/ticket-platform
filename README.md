@@ -138,4 +138,4 @@ CI 的第三個 job `e2e` 在前兩個 job 通過後以同一份 compose 檔啟�
 - **瀏覽器自動化 E2E**（`e2e/`）只涵蓋單一使用者的主要購票路徑與 Admin 後台；多人同時搶同一座位的衝突行為由後端併發測試與壓測驗證，不在瀏覽器套件內。
 - Redis 持久化失敗或磁碟滿時遙測會記錄遺失數並標示資料不完整，不會阻擋業務請求；這是刻意的取捨。
 
-開發過程採整合分支與獨立票單 worktree，交付時以 merge commit 併入 `main` 並刪除其餘分支；完整 commit 歷史保留在 `main`，交付倉庫為私有 `s0966066980/ticket-platform`。
+開發過程採整合分支與獨立票單 worktree，交付時以 merge commit 併入 `main` 並刪除其餘分支；完整 commit 歷史保留在 `main`，交付倉庫為公開的 `s0966066980/ticket-platform`。
