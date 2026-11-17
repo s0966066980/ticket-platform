@@ -113,4 +113,4 @@ docker compose -p ticket-load --env-file .env.load -f docker-compose.yml -f dock
 - **瀏覽器自動化 E2E** 未納入 CI；前端以 Vitest 行為測試與 compose 上的手動／腳本煙霧測試驗證。
 - Redis 持久化失敗或磁碟滿時遙測會記錄遺失數並標示資料不完整，不會阻擋業務請求；這是刻意的取捨。
 
-開發過程採 `integration/mvp` 整合分支與獨立票單 worktree，保留完整 commit 歷史，交付倉庫為私有 `s0966066980/ticket-platform`。
+開發過程採整合分支與獨立票單 worktree，交付時以 merge commit 併入 `main` 並刪除其餘分支；完整 commit 歷史保留在 `main`，交付倉庫為私有 `s0966066980/ticket-platform`。

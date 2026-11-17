@@ -2,9 +2,9 @@ name: PostgreSQL 16 and frontend verification
 
 "on":
   push:
-    branches: [integration/mvp]
+    branches: [main]
   pull_request:
-    branches: [integration/mvp, main]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
