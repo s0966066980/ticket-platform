@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     import_max_rows: int = 100_000
     import_batch_size: int = 1000
     worker_poll_seconds: float = 1.0
+    outbox_poll_seconds: float = 0.25
     gateway_poll_seconds: float = 1.0
     ws_version_check_seconds: float = 5.0
     ws_queue_size: int = 256
