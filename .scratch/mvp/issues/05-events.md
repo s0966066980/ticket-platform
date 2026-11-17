@@ -1,6 +1,6 @@
 # 05: Events, publication and immutable pagination
 
-Status: open
+Status: claimed
 Triage: ready-for-agent
 Blocked by: 04
 
@@ -16,4 +16,8 @@ Use tdd red-green vertical slices at approved public seams. You are not alone in
 
 ## Answer
 
-Pending.
+Implemented activity CRUD with zone inputs, owner/role restrictions, optimistic If-Match edits, publication prerequisites and configuration freeze, coordinated soft deletion, fixed ten-minute materialized catalog snapshots, and coherent seat/version endpoints. All writes use the current request transaction and explicitly commit.
+
+Reusable app.events helpers: get_event(session,event_id,principal,manage=False,lock=False), ensure_can_manage, lock_event_stream, event_json, seat_snapshot and event_version. get_event always issues SELECT with populate_existing=True; post-stream-lock booking checks should use default lock=False in READ COMMITTED so cached ORM state cannot hide deletion. lock=True uses events FOR NO KEY UPDATE and must be acquired before the stream lock only in activity management/import paths.
+
+Public tests cover stale/concurrent edits, ownership, publication/freeze, snapshot invariance under insertion/edit/deletion, expiry, expired holds and order-history deletion rejection. Python compilation passed. Actual pytest remains unexecuted because uv dependency resolution fails DNS to pypi.org; no HTTP/PG result is claimed passed. Cross-feature delete/booking race remains part of ticket06/integrated A03 verification.
