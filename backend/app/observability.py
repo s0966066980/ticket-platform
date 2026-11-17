@@ -284,14 +284,18 @@ def record_service_log(service: str, code: str, *, request_id: str | None = None
 
 
 def connection_delta(delta: int) -> int:
-    """Adjust this replica's live connection gauge; emits when due. Returns the new count."""
+    """Adjust this replica's live connection gauge and return the new count.
+
+    Safe to call from the event loop: a due gauge is handed off on a daemon
+    thread so WebSocket accept/close never waits on Redis or the spool fsync.
+    """
     runtime = _get_runtime()
     with runtime.lock:
         runtime.connections = max(0, runtime.connections + delta)
         count = runtime.connections
         due = time.monotonic() - runtime.last_gauge >= 1.0 or count == 0
     if due:
-        emit_connection_gauge()
+        threading.Thread(target=emit_connection_gauge, name='telemetry-gauge', daemon=True).start()
     return count
 
 
