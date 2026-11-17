@@ -16,6 +16,6 @@ Use tdd red-green vertical slices at approved public seams. You are not alone in
 
 ## Answer
 
-Pending.
+Implemented streaming CSV/JSON acceptance, file-content dedup with original mode, staging validation/error reports, all-or-nothing and skip-invalid application, durable checkpoint/generation fencing, original-job retry and public status/error APIs.
 
 Merger evidence: ticket07 merged with history preserved; integration compileall and diff checks PASS. PostgreSQL/HTTP import-mode, dedup and generation-recovery tests await actual CI for this source; no 100K/60s measurement is claimed. Bulk resync_required events must be handled by realtime ticket09. Source closure does not substitute for remote runtime acceptance.
