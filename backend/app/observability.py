@@ -756,7 +756,7 @@ def window_metrics(session: Session, *, window_seconds: int | None = None, now: 
                 item_complete = item_complete and latest.data_complete
             elif any(at < second for at in buckets) and any(at > second for at in buckets):
                 item_complete = False  # heartbeat gap inside this source's lifetime
-        covered = (api_rows or live) and collected_until is not None and second <= collected_until
+        covered = bool(api_rows or live) and collected_until is not None and second <= collected_until
         if not covered:
             complete = False
             items.append({'bucket_at': second.isoformat(), 'rps': None, 'p50_ms': None, 'p95_ms': None, 'p99_ms': None,
