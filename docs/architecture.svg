@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="840" viewBox="0 0 1300 840" font-family="Noto Sans CJK TC, Noto Sans TC, PingFang TC, Microsoft JhengHei, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#374151"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1d4ed8"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#047857"/></marker>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#b45309"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#b91c1c"/></marker>
+    <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#be185d"/></marker>
+  </defs>
+  <rect width="1300" height="840" fill="#ffffff"/>
+  <text x="650" y="34" text-anchor="middle" font-size="22" font-weight="700" fill="#111827">高併發活動搶票與即時監控平台：元件與資料流</text>
+  <text x="650" y="56" text-anchor="middle" fill="#4b5563">docker compose 七個服務；PostgreSQL 16 是訂單與座位狀態的唯一真實來源</text>
+
+  <rect x="40" y="130" width="1220" height="690" rx="14" fill="none" stroke="#9ca3af" stroke-dasharray="8 6"/>
+  <text x="56" y="152" fill="#6b7280">Docker Compose 內部網路（只有 nginx 對外發布 8080）</text>
+
+  <!-- left column -->
+  <rect x="60" y="70" width="220" height="46" rx="8" fill="#eef2ff" stroke="#4338ca"/>
+  <text x="170" y="90" text-anchor="middle" font-weight="700" fill="#312e81">瀏覽器</text>
+  <text x="170" y="107" text-anchor="middle" fill="#3730a3">User / Admin / Viewer</text>
+
+  <rect x="60" y="200" width="220" height="80" rx="8" fill="#f3f4f6" stroke="#374151"/>
+  <text x="170" y="224" text-anchor="middle" font-weight="700" fill="#111827">nginx</text>
+  <text x="170" y="244" text-anchor="middle" fill="#374151">反向代理 /api、/ws、/docs</text>
+  <text x="170" y="262" text-anchor="middle" fill="#374151">JSON 存取日誌（含 request_id）</text>
+
+  <rect x="60" y="340" width="220" height="60" rx="8" fill="#ecfdf5" stroke="#047857"/>
+  <text x="170" y="364" text-anchor="middle" font-weight="700" fill="#064e3b">frontend</text>
+  <text x="170" y="384" text-anchor="middle" fill="#065f46">React + Vite 靜態檔</text>
+
+  <rect x="70" y="560" width="260" height="120" rx="8" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="86" y="584" font-weight="700" fill="#111827">資料流原則</text>
+  <text x="86" y="606" fill="#374151">實線：同步呼叫　虛線：非同步、可重送</text>
+  <text x="86" y="626" fill="#374151">座位變更：DB 提交 → Outbox → Redis → WS</text>
+  <text x="86" y="646" fill="#374151">順序由 event_streams.current_version 定義</text>
+  <text x="86" y="666" fill="#374151">漏事件靠 5 秒版本核對與快照重取恢復</text>
+
+  <!-- middle column -->
+  <rect x="400" y="200" width="320" height="200" rx="8" fill="#eff6ff" stroke="#1d4ed8"/>
+  <text x="560" y="224" text-anchor="middle" font-weight="700" fill="#1e3a8a">backend：FastAPI API + WebSocket</text>
+  <text x="416" y="250" fill="#1e40af">• Auth：opaque token，每次請求查 DB</text>
+  <text x="416" y="270" fill="#1e40af">• Events / Imports：版本化、固定分頁快照</text>
+  <text x="416" y="290" fill="#1e40af">• Booking：單一交易鎖額度 → 座位 → 版本</text>
+  <text x="416" y="310" fill="#1e40af">• Payments：冪等付款嘗試、簽章回呼</text>
+  <text x="416" y="330" fill="#1e40af">• Seat feed：Redis 訂閱、有界佇列、5 秒核對</text>
+  <text x="416" y="350" fill="#1e40af">• Observability：延遲量測 → Redis Streams</text>
+  <text x="416" y="370" fill="#1e40af">• Reports：OpenPyXL write-only 串流</text>
+  <text x="416" y="390" fill="#1e40af">• Admin：使用者、指標、告警、request_id</text>
+
+  <rect x="400" y="560" width="320" height="120" rx="8" fill="#fdf2f8" stroke="#be185d"/>
+  <text x="560" y="584" text-anchor="middle" font-weight="700" fill="#831843">mock-gateway：模擬金流（獨立程序）</text>
+  <text x="416" y="610" fill="#9d174d">• 以付款 ID 冪等建立 charge，依 outcome 結算</text>
+  <text x="416" y="630" fill="#9d174d">• 持久化後延遲、重試送出 HMAC 簽章回呼</text>
+  <text x="416" y="650" fill="#9d174d">• 查帳 GET、冪等沖正 POST</text>
+  <text x="416" y="670" fill="#9d174d">• 只寫 gateway.charges，不碰訂單與座位</text>
+
+  <!-- right column -->
+  <rect x="930" y="200" width="300" height="220" rx="8" fill="#f8fafc" stroke="#0f172a"/>
+  <text x="1080" y="224" text-anchor="middle" font-weight="700" fill="#0f172a">PostgreSQL 16（唯一真實來源）</text>
+  <text x="946" y="250" fill="#1e293b" font-size="12">users / sessions / events / zones / seats</text>
+  <text x="946" y="270" fill="#1e293b" font-size="12">orders / order_items / user_event_quotas</text>
+  <text x="946" y="290" fill="#1e293b" font-size="12">payments / payment_callbacks / idempotency_keys</text>
+  <text x="946" y="310" fill="#1e293b" font-size="12">import_jobs / import_rows / import_errors</text>
+  <text x="946" y="330" fill="#1e293b" font-size="12">event_streams / seat_events / outbox_events</text>
+  <text x="946" y="350" fill="#1e293b" font-size="12">list_snapshots / list_snapshot_items</text>
+  <text x="946" y="370" fill="#1e293b" font-size="12">access_logs / service_logs</text>
+  <text x="946" y="390" fill="#1e293b" font-size="12">system_metrics / alerts / gateway.charges</text>
+  <text x="946" y="410" fill="#64748b" font-size="12">UNIQUE、CHECK、複合 FK；條件式 UPDATE 保護</text>
+
+  <rect x="930" y="470" width="300" height="100" rx="8" fill="#fef2f2" stroke="#b91c1c"/>
+  <text x="1080" y="494" text-anchor="middle" font-weight="700" fill="#7f1d1d">Redis 7（AOF always）</text>
+  <text x="946" y="518" fill="#991b1b" font-size="12">Pub/Sub seat:{event_id}：座位事件扇出</text>
+  <text x="946" y="538" fill="#991b1b" font-size="12">Streams ticket:telemetry：診斷事件交接</text>
+  <text x="946" y="558" fill="#991b1b" font-size="12">不決定座位是否售出；at-most-once 推送</text>
+
+  <rect x="930" y="630" width="300" height="130" rx="8" fill="#fffbeb" stroke="#b45309"/>
+  <text x="1080" y="654" text-anchor="middle" font-weight="700" fill="#78350f">worker：背景工作（多執行緒）</text>
+  <text x="946" y="678" fill="#92400e" font-size="12">• 鎖位逾時收斂（DB clock_timestamp）</text>
+  <text x="946" y="696" fill="#92400e" font-size="12">• 座位匯入：租約、generation、checkpoint</text>
+  <text x="946" y="714" fill="#92400e" font-size="12">• Outbox 依活動版本序 PUBLISH；付款、沖正、查帳</text>
+  <text x="946" y="732" fill="#92400e" font-size="12">• 遙測 XREADGROUP → PG 落地 → XACK；指標、告警</text>
+  <text x="946" y="750" fill="#92400e" font-size="12">• 所有工作可重複執行（冪等）</text>
+
+  <!-- arrows -->
+  <line x1="170" y1="116" x2="170" y2="198" stroke="#374151" stroke-width="2" marker-end="url(#a)"/>
+  <text x="180" y="162" fill="#374151">HTTPS / WS</text>
+
+  <line x1="170" y1="280" x2="170" y2="338" stroke="#047857" stroke-width="2" marker-end="url(#ag)"/>
+  <text x="180" y="315" fill="#047857">/ 靜態檔</text>
+
+  <line x1="280" y1="240" x2="398" y2="240" stroke="#1d4ed8" stroke-width="2" marker-end="url(#ab)"/>
+  <text x="292" y="230" fill="#1d4ed8">/api/v1、/ws</text>
+
+  <line x1="720" y1="260" x2="928" y2="260" stroke="#0f172a" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+  <text x="728" y="250" fill="#0f172a">交易：鎖位、訂單、Outbox</text>
+
+  <path d="M720 350 L820 350 L820 510 L928 510" fill="none" stroke="#b91c1c" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="826" y="470" fill="#b91c1c">XADD 日誌</text>
+
+  <path d="M928 540 L780 540 L780 390 L722 390" fill="none" stroke="#b91c1c" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="786" y="558" fill="#b91c1c">PSUBSCRIBE</text>
+  <text x="786" y="574" fill="#b91c1c">→ WS 推送</text>
+
+  <path d="M720 600 L900 600 L900 440 L1000 440 L1000 422" fill="none" stroke="#0f172a" stroke-width="2" marker-end="url(#a)"/>
+  <text x="906" y="592" fill="#0f172a">gateway.charges</text>
+
+  <line x1="928" y1="650" x2="722" y2="650" stroke="#be185d" stroke-width="2" marker-end="url(#ap)"/>
+  <text x="726" y="641" fill="#be185d">簽章 POST /charges、/reversal、GET 查帳</text>
+
+  <line x1="560" y1="558" x2="560" y2="402" stroke="#be185d" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ap)"/>
+  <text x="568" y="478" fill="#be185d">簽章回呼 /payments/callback</text>
+  <text x="568" y="496" fill="#be185d">（durable 重試、冪等處理）</text>
+
+  <line x1="1080" y1="630" x2="1080" y2="572" stroke="#b91c1c" stroke-width="2" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <text x="1088" y="605" fill="#b91c1c">PUBLISH / XACK</text>
+
+  <path d="M1230 700 L1250 700 L1250 300 L1232 300" fill="none" stroke="#0f172a" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+
+  <path d="M60 260 L50 260 L50 800 L1080 800 L1080 762" fill="none" stroke="#b45309" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ao)"/>
+  <text x="600" y="792" fill="#b45309">proxy-logs volume：nginx access.jsonl（worker 唯讀讀取，關聯 request_id）</text>
+</svg>
