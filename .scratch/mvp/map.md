@@ -21,3 +21,6 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 - Frontier refinement: 04 auth -> 05 events and 10 reports. Reports depends on schema+auth rather than Booking implementation.
 
 13 CI depends01,02,03,04 (resolved); final delivery also depends13. Configure real PG16/Redis CI and report actual result when available.
+
+- Ticket05 events/snapshot source integrated; compile/diff PASS, HTTP/PG execution pending. Unlocks 06 booking and 07 imports. [Ticket](issues/05-events.md).
+- Ticket12 load harness integrated; two load CLI plus four startup CLI checks passed, and load CLI discovery joins run_tests.sh. Full-scale measurements remain pending. [Ticket](issues/12-load_harness.md).

@@ -1,6 +1,6 @@
 # 12: Independent load and consistency harness
 
-Status: claimed
+Status: resolved
 Triage: ready-for-agent
 Blocked by: none
 
@@ -10,4 +10,4 @@ Read ../spec.md, docs/api-contract.md, docs/acceptance-plan.md and /tmp/ticket-p
 
 ## Answer
 
-Pending.
+Implemented reproducible Locust/WS/import/report benchmark commands, session and data preparation, sample fixtures, consistency SQL checks and raw-result output. Normal history-preserving merge completed. Integration reran two load CLI tests (PASS), four existing startup CLI tests (PASS), compileall, shell syntax and diff checks (PASS). Added loadtests unittest discovery to the approved one-command test runner. Worker also verified help and 100K fixture generation. No load target, PostgreSQL consistency run, network propagation or memory acceptance is claimed measured; those remain delivery/runtime verification.

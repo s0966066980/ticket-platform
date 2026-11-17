@@ -18,6 +18,7 @@ if [[ "$MODE" != frontend ]]; then
   PYTHON=${PYTHON:-"$ROOT/.venv/bin/python"}
   [[ -x "$PYTHON" ]] || { echo 'Project Python environment missing. Run ./scripts/setup.sh first.' >&2; exit 2; }
   "$PYTHON" -m unittest discover -s "$ROOT/scripts/tests" -v
+  "$PYTHON" -m unittest discover -s "$ROOT/loadtests/tests" -v
   "$PYTHON" -c 'import pytest, psycopg' || { echo 'Install backend test dependencies using scripts/setup.sh.' >&2; exit 2; }
   if [[ -n ${TEST_DATABASE_URL:-} ]]; then
     "$PYTHON" - <<'PY'

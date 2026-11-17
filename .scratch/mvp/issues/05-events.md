@@ -1,6 +1,6 @@
 # 05: Events, publication and immutable pagination
 
-Status: claimed
+Status: resolved
 Triage: ready-for-agent
 Blocked by: 04
 
@@ -21,3 +21,5 @@ Implemented activity CRUD with zone inputs, owner/role restrictions, optimistic 
 Reusable app.events helpers: get_event(session,event_id,principal,manage=False,lock=False), ensure_can_manage, lock_event_stream, event_json, seat_snapshot and event_version. get_event always issues SELECT with populate_existing=True; post-stream-lock booking checks should use default lock=False in READ COMMITTED so cached ORM state cannot hide deletion. lock=True uses events FOR NO KEY UPDATE and must be acquired before the stream lock only in activity management/import paths.
 
 Public tests cover stale/concurrent edits, ownership, publication/freeze, snapshot invariance under insertion/edit/deletion, expiry, expired holds and order-history deletion rejection. Python compilation passed. Actual pytest remains unexecuted because uv dependency resolution fails DNS to pypi.org; no HTTP/PG result is claimed passed. Cross-feature delete/booking race remains part of ticket06/integrated A03 verification.
+
+Merger evidence: ticket-05 merged normally with history preserved. Integration compileall and diff checks PASS. HTTP/PG16 behavior remains unverified due the recorded dependency/socket limits; closure covers completed source, not acceptance execution. Booking must use fresh get_event(..., lock=False) after lock_event_stream to detect concurrent deletion.
