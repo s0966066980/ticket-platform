@@ -236,3 +236,88 @@ def test_callback_with_wrong_amount_or_order_is_rejected_without_side_effects(cl
     assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["status"]=="PENDING_PAYMENT"
     assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["payments"]==[{"id":payment_id,"status":"PENDING"}]
     assert deliver(client,callback_body(payment_id,order)).json()["result"]=="PAID"
+
+
+def force_expiry(db_session,order_id):
+    from sqlalchemy import update
+    from app.models import Order,Seat
+    past=datetime.now(timezone.utc)-timedelta(days=1)
+    db_session.execute(update(Order).where(Order.id==UUID(order_id)).values(expires_at=past).execution_options(synchronize_session=False))
+    db_session.execute(update(Seat).where(Seat.current_order_id==UUID(order_id)).values(held_until=past).execution_options(synchronize_session=False))
+    db_session.commit()
+
+
+def reversal_rows(db_session):
+    from sqlalchemy import select
+    from app.models import OutboxEvent
+    return db_session.scalars(select(OutboxEvent).where(OutboxEvent.kind=="payment_reversal_requested")).all()
+
+
+def test_late_success_after_cancel_keeps_order_canceled_and_queues_reversal(client,db_session):
+    from app.models import Payment
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    assert client.post("/api/v1/orders/"+order["id"]+"/cancel",headers=headers).json()["status"]=="CANCELED"
+    assert seat_states(client,headers,event)==["AVAILABLE"]
+    body=callback_body(payment_id,order,charge_id="ch-late")
+    late=deliver(client,body)
+    assert late.status_code==200
+    assert late.json()["result"]=="LATE_PAYMENT_REVERSAL_PENDING"
+    canceled=client.get("/api/v1/orders/"+order["id"],headers=headers).json()
+    assert canceled["status"]=="CANCELED"
+    assert canceled["payments"]==[{"id":payment_id,"status":"REVERSAL_PENDING"}]
+    assert seat_states(client,headers,event)==["AVAILABLE"]
+    payment=db_session.get(Payment,UUID(payment_id))
+    assert payment.reversal_key=="reverse:ch-late" and payment.reversed_at is None
+    rows=reversal_rows(db_session)
+    assert len(rows)==1 and rows[0].payload=={"payment_id":payment_id,"provider_charge_id":"ch-late","idempotency_key":"reverse:ch-late"}
+    assert rows[0].published_at is None
+    # Replaying the same provider event, or a further success event, queues nothing more.
+    assert deliver(client,body).json()==late.json()
+    assert deliver(client,callback_body(payment_id,order,charge_id="ch-late")).json()["result"]=="REVERSAL_PENDING"
+    assert len(reversal_rows(db_session))==1
+
+
+def test_late_success_after_expiry_converges_order_releases_seats_and_queues_reversal(client,db_session):
+    headers,event,order=setup_order(client,db_session,count=2)
+    payment_id=pay(client,headers,order).json()["id"]
+    force_expiry(db_session,order["id"])
+    assert client.get("/api/v1/events/"+event["id"]+"/version",headers=headers).json()["version"]==1
+    late=deliver(client,callback_body(payment_id,order))
+    assert late.status_code==200
+    assert late.json()["result"]=="LATE_PAYMENT_REVERSAL_PENDING"
+    expired=client.get("/api/v1/orders/"+order["id"],headers=headers).json()
+    assert expired["status"]=="EXPIRED"
+    assert expired["payments"]==[{"id":payment_id,"status":"REVERSAL_PENDING"}]
+    assert seat_states(client,headers,event)==["AVAILABLE","AVAILABLE"]
+    assert client.get("/api/v1/events/"+event["id"]+"/version",headers=headers).json()["version"]==2
+    assert len(reversal_rows(db_session))==1
+    assert client.post("/api/v1/events/"+event["id"]+"/bookings",headers={**headers,"Idempotency-Key":"again"},json={"seat_ids":[item["seat_id"] for item in order["items"]]}).status_code==201
+
+
+def test_late_success_cannot_release_a_seat_reclaimed_by_a_newer_order(client,db_session):
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    force_expiry(db_session,order["id"])
+    other,_=account(client,"other@example.test")
+    newer=client.post("/api/v1/events/"+event["id"]+"/bookings",headers={**other,"Idempotency-Key":"newer"},json={"seat_ids":[order["items"][0]["seat_id"]]})
+    assert newer.status_code==201
+    assert deliver(client,callback_body(payment_id,order)).json()["result"]=="LATE_PAYMENT_REVERSAL_PENDING"
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["status"]=="EXPIRED"
+    assert seat_states(client,headers,event)==["HELD"]
+    assert client.get("/api/v1/orders/"+newer.json()["id"],headers=other).json()["status"]=="PENDING_PAYMENT"
+
+
+def test_extra_success_on_paid_order_is_reversed_not_double_sold(client,db_session):
+    headers,event,order=setup_order(client,db_session)
+    first=pay(client,headers,order,outcome="failure").json()["id"]
+    assert deliver(client,callback_body(first,order,status="FAILED")).json()["result"]=="PAYMENT_FAILED"
+    second=pay(client,headers,order).json()["id"]
+    assert deliver(client,callback_body(second,order)).json()["result"]=="PAID"
+    # The provider later reports the first attempt as successful after all.
+    extra=deliver(client,callback_body(first,order))
+    assert extra.json()["result"]=="EXTRA_PAYMENT_REVERSAL_PENDING"
+    paid=client.get("/api/v1/orders/"+order["id"],headers=headers).json()
+    assert paid["status"]=="PAID"
+    assert [p["status"] for p in paid["payments"]]==["REVERSAL_PENDING","SUCCEEDED"]
+    assert client.get("/api/v1/events/"+event["id"]+"/version",headers=headers).json()["version"]==2
