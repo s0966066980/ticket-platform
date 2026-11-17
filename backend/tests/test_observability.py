@@ -26,6 +26,8 @@ from app.observability import (
 from tests.test_auth import bearer, login, seed_test_accounts
 
 pytestmark = pytest.mark.integration
+# Captured at import: fixtures point REDIS_URL at an unreachable port to exercise the spool path.
+REAL_REDIS_URL = os.environ.get('REDIS_URL_FOR_TESTS') or os.environ.get('REDIS_URL') or 'redis://127.0.0.1:6379/0'
 BACKEND = Path(__file__).parents[1]
 UNREACHABLE_REDIS = 'redis://127.0.0.1:1/0'
 
@@ -211,7 +213,7 @@ def redis_available(url):
 
 
 def test_stream_path_commits_to_postgres_before_acknowledging(telemetry_env, db_session, monkeypatch):
-    url = os.environ.get('REDIS_URL_FOR_TESTS') or os.environ.get('REDIS_URL') or 'redis://127.0.0.1:6379/0'
+    url = REAL_REDIS_URL
     if not redis_available(url):
         pytest.skip(f'Redis 7 not reachable at {url}; stream path unverified in this run')
     monkeypatch.setenv('REDIS_URL', url)
