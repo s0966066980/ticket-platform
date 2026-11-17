@@ -6,12 +6,12 @@
 
 | 項目 | 值 |
 | --- | --- |
-| 主機 | Intel Core Ultra 7 265KF，20 logical CPU，30 GiB RAM，NVMe（`pg_test_fsync` fdatasync 約 0.32 ms） |
-| OS | Ubuntu（Linux 7.0.0-42-generic） |
+| 主機 | Intel Core Ultra 7 265KF，20 logical CPU，30 GiB RAM；Docker 資料位於 Kingston SKC2500M8 2 TB NVMe（`pg_test_fsync` fdatasync 約 0.32 ms） |
+| OS | Ubuntu 26.04.1 LTS（Linux 7.0.0-42-generic） |
 | 容器 | Docker 29.9.1，Compose v5.6.0；受測系統為 `docker-compose.yml` + `docker-compose.load.yml`（獨立專案 `ticket-load`，port 8081，乾淨 volume） |
 | 受測配置 | `API_WORKERS=4`（4 個 uvicorn 程序，各 40 執行緒）、PostgreSQL 16 `max_connections=300`、連線池 20+20／程序、`DATABASE_POOL_TIMEOUT_SECONDS=5`、Nginx 1 worker／core、65,536 fd |
 | 負載產生器 | 同一台機器上的 Locust 2.47（單一程序）與 `websockets` 17；因此結果是「負載產生器與受測系統共用 20 核」的保守數字 |
-| 程式版本 | commit `39c5b66`（`integration/mvp`） |
+| 程式版本 | 每個情境的結果標題各自標示執行時的 commit；這些 commit 都在 `main` 的歷史中 |
 
 限制：同機壓測使客戶端與伺服器互相搶 CPU；`p50/p95/p99` 以客戶端（Locust）觀測為準，包含 Nginx 排隊與網路時間，伺服器端 API 處理時間另記於 `access_logs`。
 
@@ -53,22 +53,48 @@
 
 設定：`loadtests/websocket_benchmark.py`，2,000 條經 Nginx 的 WebSocket 連線以同一 Viewer 身分完成應用層 token 握手並取得同一份 HTTP 快照；另一帳號在 60 秒穩態期間反覆「保留一席 → 取消」產生真實座位變更。每次變更量測「HTTP 請求送出 → 各連線收到對應版本的 frame」的客戶端延遲（nearest-rank 百分位），檢查版本連續、重同步次數與斷線。
 
-### 結果（commit 39c5b66，2026-11-17 01:50 UTC；`loadtests/results/final/websocket.json`，逐筆送達紀錄 `websocket.deliveries.jsonl`）
+### 結果（commit eba5cc2，2026-11-17 07:06 UTC；原始輸出 `loadtests/results/final/websocket.json`、逐筆送達 `websocket.deliveries.jsonl`、資源取樣 `websocket-resources.csv`、伺服器端請求 `websocket-server-access.txt`、一致性稽核 `websocket-consistency.json`）
 
-| 指標 | 值 |
-| --- | --- |
-| 建立並通過應用層認證的連線 | 2,000 / 2,000（量測前全部就緒，結束前仍全部存活） |
-| 穩態時間 | 60.4 秒 |
-| 座位變更次數（保留／取消交替） | 78 |
-| 每次變更在 10 秒內送達全部 2,000 條連線 | 78 / 78；單次最慢 0.33 秒 |
-| 送達樣本數 | 156,000 |
-| 送達延遲（HTTP 送出 → 收到 frame） | p50 255 ms、p95 313 ms、p99 324 ms |
-| 版本跳號／重同步 | 0；收到 frame 180,000（含每 5 秒 heartbeat） |
-| 斷線、慢連線淘汰、錯誤 | 0 |
+**吞吐（RPS）與錯誤率**
 
-延遲組成：購票 API 處理（含版本鎖）約數十 ms，worker 以 0.25 秒輪詢 Outbox 後 PUBLISH（平均等待約 125 ms），Redis → 4 個 API 程序 → 2,000 條連線的扇出在數十 ms 內完成；因此 p50 約 255 ms 主要是輪詢間隔，可用更短的 `OUTBOX_POLL_SECONDS` 換取延遲，代價是 worker 空轉查詢。
+| 指標 | 值 | 錯誤率 |
+| --- | --- | --- |
+| 連線 | 2,000 條經 Nginx 建立並完成應用層 token 認證，穩態 61.0 秒期間全部存活 | 斷線 0 / 2,000（0%） |
+| 座位變更 HTTP 請求（保留 40 次、取消 40 次） | 80 次，1.31 req/s | 失敗 0 / 80（0%）；伺服器端 5xx 0、4xx 0 |
+| 伺服器推送 frame（含每 5 秒 heartbeat） | 184,000 個，約 3,017 frames/s | — |
+| 座位變更送達（每次變更 × 2,000 連線） | 160,000 次，約 2,623 次/s | 未送達 0 / 160,000（0%） |
+| 每次變更送達全部 2,000 條連線 | 80 / 80；單次最慢 0.29 秒（要求 10 秒內） | 逾時 0 |
+| 版本跳號／重同步 | 0 | — |
 
-第一次執行（commit d7a9698）在第 26 次變更失敗：2,000 條連線同時重同步。原因是 heartbeat 回報的是 `current_version`，而座位變更提交到 worker 發布之間有最多 0.25 秒的窗口，落在窗口內的 heartbeat 會讓客戶端誤判漏事件。修正為回報 `published_version`（客戶端真正可能漏掉的只有已發布的版本），前端另加 1–2 秒寬限與抖動，重跑即通過。API 容器在 2,000 條連線下的記憶體未由此 harness 記錄，不列數字。
+**延遲**
+
+| 量測 | p50 | p95 | p99 |
+| --- | --- | --- | --- |
+| 送達延遲：HTTP 送出 → 各連線收到對應 frame（客戶端單調時鐘，nearest-rank） | 248 ms | 273 ms | 283 ms |
+| 伺服器端處理：保留座位 `POST /bookings`（`access_logs`） | 19.4 ms | 24.8 ms | 26.5 ms |
+| 伺服器端處理：取消 `POST /orders/{id}/cancel` | 10.2 ms | 15.4 ms | 17.1 ms |
+
+**資源用量**（`docker stats` 每約 2 秒取樣一次，穩態 30 個樣本；CPU 以單核 100% 計，主機共 20 核）
+
+| 容器 | CPU 平均 | CPU 最高 | 記憶體最高 |
+| --- | --- | --- | --- |
+| backend（4 個 API 程序合計） | 16.5% | 42.5% | 547 MiB |
+| nginx | 3.6% | 10.6% | 213 MiB |
+| postgres | 8.4% | 13.3% | 388 MiB |
+| worker | 5.3% | 18.3% | 84 MiB |
+| redis | 2.3% | 2.9% | 13 MiB |
+
+2,000 條連線在第一個取樣週期（約 2 秒）內建立完成，該次取樣 backend CPU 87.5%、記憶體 526 MiB。由於沒有在連線前取到閒置基準，無法精確換算每條連線的記憶體；整個執行期間 backend 記憶體介於 526 與 547 MiB 之間。
+
+**一致性稽核**：結束 15 秒後以 `--require-settled` 稽核該活動，11 項違規全部為 0，未發布 Outbox 0、待清理逾時訂單 0。
+
+**瓶頸分析**
+
+1. **資源沒有飽和。** 穩態時 backend 平均只用 16.5% 的單核，Redis 2.3%，Nginx 3.6%；每秒約 3,000 個 frame 的扇出在此規模下成本很低。唯一的尖峰是連線建立瞬間（backend 87.5%），屬於一次性的握手與認證查詢。
+2. **延遲由 Outbox 輪詢間隔主導。** 伺服器處理保留只要約 20 ms，但送達 p50 約 250 ms，與 `OUTBOX_POLL_SECONDS=0.25` 相當；p50 到 p99 只差約 35 ms，代表扇出到 2,000 條連線本身很快。p50 貼近整個輪詢間隔而非一半，推論是因為 harness 在前一次變更送達後立即送出下一次，每次變更都剛好落在 worker 輪詢之後，因而等滿近一個間隔；隨機到達的變更平均應只等一半。此推論未另外量測。縮短輪詢可直接降低延遲，代價是 worker 空轉查詢增加。
+3. **此情境未觸及推送路徑的容量上限。** 每秒只有約 1.3 次變更，壓力來自 2,000 倍的扇出而非變更頻率；更高變更頻率或更多連線下的上限未量測，不列數字。負載產生器（單一 Python 程序承接 2,000 條連線）的 CPU 未取樣，但所有變更都在 0.29 秒內被全部連線收到，沒有跡象顯示客戶端成為瓶頸。
+
+**第一次執行**（commit d7a9698）在第 26 次變更失敗：2,000 條連線同時重同步。原因是 heartbeat 回報的是 `current_version`，而座位變更提交到 worker 發布之間有最多 0.25 秒的窗口，落在窗口內的 heartbeat 會讓客戶端誤判漏事件。修正為回報 `published_version`（客戶端真正可能漏掉的只有已發布的版本），前端另加 1–2 秒寬限與抖動。修正後第一次通過的執行（commit 39c5b66）送達延遲 p50 255 ms、p95 313 ms、p99 324 ms；本次在最新程式上重跑並補上吞吐、資源與一致性資料。
 
 ## 批次匯入：100,000 列 60 秒內完成
 
