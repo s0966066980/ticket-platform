@@ -26,3 +26,7 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 - Ticket12 load harness integrated; two load CLI plus four startup CLI checks passed, and load CLI discovery joins run_tests.sh. Full-scale measurements remain pending. [Ticket](issues/12-load_harness.md).
 
 - Ticket10 report source integrated; compile/diff PASS, PostgreSQL/HTTP/XLSX tests and 500K memory measurement remain pending. [Ticket](issues/10-reports.md).
+
+- Ticket13 CI source integrated; three gate checks, YAML parse and compile/diff PASS. Remote backend/frontend result must be read from GitHub run status. [Ticket](issues/13-ci.md).
+
+14 observability depends04 and is ready;09 realtime/worker now depends06,07,14. Shared pipeline separated from seat mutation dependencies.
