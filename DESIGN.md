@@ -155,7 +155,7 @@ E         At index 1 diff: 201 != 409
 
 ### 4. 情境 B 實測
 
-實際執行（`LOADTEST.md` 情境 B，commit 8b29aea）：2,000 條經 Nginx 的 WebSocket 連線全部完成握手並存活 61 秒；80 次真實座位變更每一次都在 0.29 秒內送達全部 2,000 條連線，共 160,000 次送達、0 次未送達；送達延遲 p50 248 ms、p95 273 ms、p99 283 ms（HTTP 送出到收到 frame，客戶端單調時鐘）；伺服器推送約 3,017 frames/s；重同步 0、斷線 0；穩態 backend 平均 16.5% 單核、記憶體最高 547 MiB；結束後一致性稽核 0 違規。延遲主要來自 0.25 秒的 Outbox 輪詢。第一次執行暴露了 heartbeat 以 `current_version` 回報造成的誤判重同步，已修正為 `published_version`（見 `LOADTEST.md`）。
+實際執行（`LOADTEST.md` 情境 B 最新一輪，commit `9ae20b1`，緊接情境 A 之後在同一資料庫執行）：2,000 條經 Nginx 的 WebSocket 連線全部完成應用層 token 認證，並在 61.3 秒穩態期間全部存活；80 次真實座位變更每一次都在 0.33 秒內送達全部 2,000 條連線，共 160,000 次送達、0 次未送達；送達延遲 p50 252 ms、p95 286 ms、p99 312 ms（HTTP 送出到收到 frame，客戶端單調時鐘）；伺服器推送約 3,000 frames/s；重同步 0、斷線 0；backend（4 個 API 程序合計）平均 25.3% 單核（含連線建立瞬間 323% 的尖峰）、記憶體最高 683 MiB；結束後一致性稽核 0 違規。延遲主要來自 0.25 秒的 Outbox 輪詢。第一次執行暴露了 heartbeat 以 `current_version` 回報造成的誤判重同步，已修正為 `published_version`（見 `LOADTEST.md`）。
 
 ## Q5 權限與憑證失效
 
