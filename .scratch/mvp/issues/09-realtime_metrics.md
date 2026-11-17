@@ -2,7 +2,7 @@
 
 Status: open
 Triage: ready-for-agent
-Blocked by: 06, 07, 14
+Blocked by: 06, 07, 08, 14
 
 ## Spec
 
