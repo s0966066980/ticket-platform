@@ -1,6 +1,6 @@
 # 07: Recoverable CSV and JSON import
 
-Status: open
+Status: resolved
 Triage: ready-for-agent
 Blocked by: 05
 
@@ -17,3 +17,5 @@ Use tdd red-green vertical slices at approved public seams. You are not alone in
 ## Answer
 
 Pending.
+
+Merger evidence: ticket07 merged with history preserved; integration compileall and diff checks PASS. PostgreSQL/HTTP import-mode, dedup and generation-recovery tests await actual CI for this source; no 100K/60s measurement is claimed. Bulk resync_required events must be handled by realtime ticket09. Source closure does not substitute for remote runtime acceptance.

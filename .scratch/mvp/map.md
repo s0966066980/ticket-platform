@@ -32,3 +32,5 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 14 observability depends04 and is ready;09 realtime/worker now depends06,07,14. Shared pipeline separated from seat mutation dependencies.
 
 - Ticket06 booking source integrated; compile/diff PASS, new PostgreSQL concurrency tests await next actual CI (prior baseline pass is separate). Unlocks08 payments. [Ticket](issues/06-booking.md).
+
+- Ticket07 recoverable import source integrated; compile/diff PASS, new import tests await actual GitHub CI. Bulk resync_required contract feeds realtime09. [Ticket](issues/07-imports.md).
