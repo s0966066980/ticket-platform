@@ -64,20 +64,25 @@ docker compose down
 
 ## 本機開發與測試
 
-需要 Python 3.13+、Node.js 24、npm，以及 PostgreSQL 16 server binaries（`/usr/lib/postgresql/16/bin`）。一行執行全部測試：
+需要 Python 3.13+、Node.js 24、npm、PostgreSQL 16 server binaries（`/usr/lib/postgresql/16/bin`），以及 Docker（測試用 Redis）。第一次先安裝依賴，之後一行執行全部測試：
 
 ```bash
-PYTHON_BIN=python3.13 ./scripts/setup.sh
-REDIS_URL=redis://127.0.0.1:6379/0 ./scripts/run_tests.sh
+PYTHON_BIN=python3.13 ./scripts/setup.sh    # 第一次：建立 .venv 並安裝後端與前端依賴
+./scripts/run_tests.sh                      # 之後每次：一行執行全部測試
 ```
 
-`run_tests.sh` 先驗證 CLI 合約，再建立獨立的暫存 PostgreSQL 16 cluster、執行 migration 與後端測試（含併發測試），最後執行前端測試與 production build。後端測試不以 SQLite 代替。即時推送與 worker 測試需要可連線的 Redis 7（`REDIS_URL`）；未設定時這些測試會被跳過並明確列出，CI 則強制要求不得跳過。
+`run_tests.sh` 依序執行：CLI 合約測試 → 建立拋棄式 PostgreSQL 16 cluster（從 55432 起找第一個空閒埠）→ 啟動拋棄式 Redis 7 容器 → migration 與全部後端測試（含併發、即時推送、worker）→ 前端測試與 production build。結束時自動停止資料庫並移除 Redis 容器；任何一項失敗，結束碼即非 0。不需要先啟動應用程式，也不會碰到展示或壓測堆疊。
 
-```bash
-./scripts/run_tests.sh --backend-only
-./scripts/run_tests.sh --frontend-only
-TEST_DATABASE_URL=postgresql+psycopg://ticket_test@127.0.0.1:55432/ticket_test ./scripts/run_tests.sh   # 自備可丟棄的 ticket_test* 資料庫
-```
+| 情況 | 指令 |
+| --- | --- |
+| 只跑後端或前端 | `./scripts/run_tests.sh --backend-only`、`--frontend-only` |
+| 指定測試資料庫埠 | `PG_TEST_PORT=55440 ./scripts/run_tests.sh` |
+| 使用自己的 Redis | `REDIS_URL=redis://127.0.0.1:6379/0 ./scripts/run_tests.sh` |
+| 使用自備的拋棄式資料庫 | `TEST_DATABASE_URL=postgresql+psycopg://<user>@<host>:<port>/ticket_test ./scripts/run_tests.sh`（名稱必須以 `ticket_test` 開頭） |
+
+沒有 Docker 時，依賴 Redis 的測試會被標示為跳過並列出原因；CI 一律提供 Redis 並拒絕任何跳過。
+
+**測試與壓測的差別**：測試驗證功能是否正確，自己建立並刪除資料庫，不需要啟動系統；壓測量測效能，需要整套系統在獨立的 `ticket-load` 堆疊（埠 8081，資料庫埠 55433）上執行，見下方「壓測」。瀏覽器 E2E 則需要展示堆疊（埠 8080）。三者埠號互不衝突，可以同時存在。
 
 後端開發入口（自備 PostgreSQL／Redis 時）：
 
@@ -104,11 +109,19 @@ CI 的第三個 job `e2e` 在前兩個 job 通過後以同一份 compose 檔啟�
 
 ## 壓測
 
-腳本與執行方式見 [loadtests/README.md](loadtests/README.md)；實際結果、機器規格與瓶頸分析見 [LOADTEST.md](LOADTEST.md)。壓測使用獨立的 compose 專案（`docker-compose.load.yml` 覆蓋層，對 localhost 發布 PostgreSQL 以便產生 fixture 與一致性稽核）：
+壓測使用獨立的 compose 專案 `ticket-load`（`docker-compose.yml` 加上 `docker-compose.load.yml` 覆蓋層，設定在 `loadtests/load.env`）：對外埠 8081、PostgreSQL 發布在 127.0.0.1:55433 供 fixture 產生與一致性稽核使用，資料與展示堆疊完全分開。`scripts/loadtest.sh` 是唯一入口：
 
 ```bash
-docker compose -p ticket-load --env-file .env.load -f docker-compose.yml -f docker-compose.load.yml up -d --build
+./scripts/loadtest.sh all       # 啟動壓測堆疊並依序執行 A、B、匯入、Excel 四個情境
+./scripts/loadtest.sh up        # 只啟動壓測堆疊
+./scripts/loadtest.sh a         # 情境 A：3,000 人搶 10,000 席 60 秒，結束後一致性稽核
+./scripts/loadtest.sh b         # 情境 B：2,000 條 WebSocket 60 秒，含資源取樣與一致性稽核
+./scripts/loadtest.sh import    # 100,000 列 CSV 與 JSON 匯入
+./scripts/loadtest.sh excel     # 50 萬筆訂單 Excel，單一 API 程序 512 MiB 上限（使用 127.0.0.1:8000）
+./scripts/loadtest.sh down      # 停止並刪除壓測堆疊與其資料
 ```
+
+每次執行的原始輸出放在 `loadtests/results/<時間戳>/`，fixture（含測試帳號與 token）放在 `loadtests/fixtures/<時間戳>/`，兩者都不入版控。實際結果、機器規格與瓶頸分析見 [LOADTEST.md](LOADTEST.md)；各腳本的細節見 [loadtests/README.md](loadtests/README.md)。
 
 ## 已知問題與未完成項目
 

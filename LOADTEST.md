@@ -1,6 +1,6 @@
 # LOADTEST：壓測情境、結果與瓶頸分析
 
-所有數字均來自本文件記錄的實際執行；原始輸出保存在 `loadtests/results/`（fixtures 與 sessions 含測試憑證，不入版控；`results/` 亦不入版控，本文件引用的 JSON／CSV 在交付機器上保留）。腳本與執行方式見 `loadtests/README.md`。
+所有數字均來自本文件記錄的實際執行；原始輸出保存在 `loadtests/results/`（fixtures 與 sessions 含測試憑證，不入版控；`results/` 亦不入版控，本文件引用的 JSON／CSV 在交付機器上保留）。重現方式：`./scripts/loadtest.sh all`；各步驟細節見 `loadtests/README.md`。
 
 ## 測試機器與環境
 
@@ -8,7 +8,7 @@
 | --- | --- |
 | 主機 | Intel Core Ultra 7 265KF，20 logical CPU，30 GiB RAM；Docker 資料位於 Kingston SKC2500M8 2 TB NVMe（`pg_test_fsync` fdatasync 約 0.32 ms） |
 | OS | Ubuntu 26.04.1 LTS（Linux 7.0.0-42-generic） |
-| 容器 | Docker 29.9.1，Compose v5.6.0；受測系統為 `docker-compose.yml` + `docker-compose.load.yml`（獨立專案 `ticket-load`，port 8081，乾淨 volume） |
+| 容器 | Docker 29.9.1，Compose v5.6.0；受測系統為 `docker-compose.yml` + `docker-compose.load.yml`（獨立專案 `ticket-load`，對外 8081，設定見 `loadtests/load.env`），以 `./scripts/loadtest.sh` 啟動與執行 |
 | 受測配置 | `API_WORKERS=4`（4 個 uvicorn 程序，各 40 執行緒）、PostgreSQL 16 `max_connections=300`、連線池 20+20／程序、`DATABASE_POOL_TIMEOUT_SECONDS=5`、Nginx 1 worker／core、65,536 fd |
 | 負載產生器 | 同一台機器上的 Locust 2.47（單一程序）與 `websockets` 17；因此結果是「負載產生器與受測系統共用 20 核」的保守數字 |
 | 程式版本 | 每個情境的結果標題各自標示執行時的 commit；這些 commit 都在 `main` 的歷史中 |

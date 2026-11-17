@@ -1,85 +1,93 @@
 # Reproducible load and export checks
 
-These are executable harnesses, **not measured results**. Run against an isolated PostgreSQL 16 database with migrated schema and the complete API/worker/gateway/Redis stack. Record API-server and load-generator CPU/RAM/OS separately, container/resource limits, raw outputs and the commit SHA beside results; never replace the required scenarios with smaller smoke settings and claim full acceptance.
+These are executable harnesses, **not measured results**; measured numbers live in `../LOADTEST.md`. Never replace the required scenarios with smaller smoke settings and claim full acceptance.
 
-Install harness dependencies into the project venv:
+## Quick start
 
 ```bash
-.venv/bin/python -m pip install -r loadtests/requirements.txt
-mkdir -p loadtests/results loadtests/fixtures
-git rev-parse HEAD > loadtests/results/commit.txt
-.venv/bin/python -m pip freeze > loadtests/results/dependencies.txt
+PYTHON_BIN=python3.13 ./scripts/setup.sh   # once: project .venv
+./scripts/loadtest.sh all                  # load stack + scenarios A, B, import, Excel
+./scripts/loadtest.sh down                 # remove the load stack and its data
 ```
 
-`LOAD_DATABASE_URL` must refer to a disposable database named `ticket_test*` or `*_load` for fixture generation. Provide it through environment, never as a command-line password. Run Alembic migrations on that database before generating fixtures. No existing data is deleted; each invocation uses a fresh namespace. Fixtures and sessions are private files (mode 0600), excluded from Git. They contain test credentials or bearer tokens and must not be published in reports.
+`scripts/loadtest.sh` installs `loadtests/requirements.txt` into `.venv` when needed, starts the isolated compose project `ticket-load`, and runs each scenario exactly as documented below. Single scenarios: `./scripts/loadtest.sh up`, then `a`, `b`, `import` or `excel`. Each run writes:
 
-## A: 3000 ready users for 60 seconds
+- `loadtests/fixtures/<run>/`: generated fixtures and authenticated session manifests. They contain test credentials and bearer tokens (directory mode 0700, files 0600) and are gitignored; never publish them.
+- `loadtests/results/<run>/`: raw evidence (`commit.txt`, `machine.txt`, `dependencies.txt`, Locust CSV/HTML, benchmark JSON, delivery logs, resource samples, consistency audits). Gitignored; quote numbers from here into `LOADTEST.md`.
 
-Prepare 3000 distinct users and one published 10000-seat event. Direct SQL fixture setup is distinct from API correctness evidence. API, worker and gateway must all point at the same disposable DB.
+## The load stack
+
+| Item | Value (from `loadtests/load.env`) |
+| --- | --- |
+| Compose | `docker compose -p ticket-load --env-file loadtests/load.env -f docker-compose.yml -f docker-compose.load.yml` |
+| Public URL | `http://localhost:8081` (the demo stack keeps 8080) |
+| PostgreSQL on the host | `127.0.0.1:55433`, database `ticket_platform_load`, user `ticket` |
+| `LOAD_DATABASE_URL` used by fixtures and audits | `postgresql+psycopg://ticket:ticket-load-only@127.0.0.1:55433/ticket_platform_load` |
+
+API, worker and gateway all use that one disposable database. Fixture generation writes directly with SQL (it refuses databases not named `ticket_test*` or `*_load`) and never deletes existing data: each invocation uses a fresh namespace, so runs can repeat on the same stack. Direct SQL fixtures are setup, not API correctness evidence.
+
+## What each scenario does
+
+The script's steps, for running them by hand (`BASE=http://localhost:8081`, `F` and `R` are the fixture and result directories, `LOAD_DATABASE_URL` exported as above).
+
+### A: 3,000 ready users for 60 seconds
 
 ```bash
-export LOAD_DATABASE_URL='postgresql+psycopg://ticket_test@127.0.0.1:55432/ticket_test_load'
-.venv/bin/python scripts/generate_load_data.py booking --output loadtests/fixtures/booking.json
-.venv/bin/python loadtests/prepare_sessions.py --base-url http://localhost:8080 --fixture loadtests/fixtures/booking.json --output loadtests/fixtures/booking-sessions.json
-LOAD_FIXTURE=loadtests/fixtures/booking-sessions.json LOAD_RESULT=loadtests/results/booking.json \
-  .venv/bin/python -m locust -f loadtests/locustfile.py --headless --host http://localhost:8080 \
-  --csv loadtests/results/booking --csv-full-history --html loadtests/results/booking.html --stop-timeout 20
+.venv/bin/python scripts/generate_load_data.py booking --output $F/booking.json
+.venv/bin/python loadtests/prepare_sessions.py --base-url $BASE --fixture $F/booking.json --output $F/booking-sessions.json --workers 32
+LOAD_FIXTURE=$F/booking-sessions.json LOAD_RESULT=$R/booking.json \
+  .venv/bin/python -m locust -f loadtests/locustfile.py --headless --host $BASE \
+  --csv $R/booking --csv-full-history --html $R/booking.html --stop-timeout 20
+sleep 20
+.venv/bin/python scripts/check_consistency.py --event-id <event_id from booking.json> --require-settled --output $R/booking-consistency.json
 ```
 
-The load shape ramps at 100 users/sec, waits for all 3000 preauthenticated users to finish on_start, resets Locust statistics, then holds all users for at least 60 monotonic seconds. Warmup has a 180-second cap. Do **not** add a 60-second `--run-time`, which would include ramp-up. The summary states actual ready count and steady interval. Raw CSV history includes warmup rows before the statistics reset; keep phase timing from the summary when analyzing it. This harness intentionally uses one Locust process; distributed execution requires explicit account partitioning and is rejected rather than sharing user accounts accidentally.
+The load shape ramps at 100 users/s, waits until all 3,000 preauthenticated users finished `on_start`, resets Locust statistics, then holds all users for at least 60 monotonic seconds (warmup capped at 180 s). Do **not** add `--run-time`, which would include ramp-up. Each account repeatedly buys one ticket (70% zone allocation, 30% named seat) and pays with a successful mock payment, 50–200 ms think time, under the real 4-ticket quota. Expected `409` business outcomes are recorded by code in `business_http_counts` and excluded from Locust failures; network errors and 5xx are failures and retry with the same Idempotency-Key. The single-process harness rejects distributed Locust to avoid sharing accounts.
 
-Each account continuously buys one ticket, 70% by area and 30% by specified seat, and initiates a successful mock payment after a booking. Every account is subject to the real 4-ticket quota; 3000 accounts have a theoretical maximum of 12000 tickets but only 10000 seats exist. Later quota/seat-contention 409 responses are expected, retained by code in business_http_counts. They are excluded from Locust infrastructure failure counts; both classes must appear in the final report. Network/5xx retries reuse the original action key. There is 50–200ms client think time.
+The audit runs in a read-only repeatable-read transaction: duplicate sold seats, order totals/counts, paid seat/payment ownership, active holds, effective quotas, event versions and Outbox. With `--require-settled`, unpublished Outbox rows and pending reversals are failures.
 
-After workers converge, audit using the fixture's event_id:
+### B: 2,000 subscribers plus real seat changes
 
 ```bash
-.venv/bin/python scripts/check_consistency.py --event-id EVENT_UUID --require-settled --output loadtests/results/booking-consistency.json
+.venv/bin/python scripts/generate_load_data.py booking --users 2 --output $F/ws.json
+.venv/bin/python loadtests/prepare_sessions.py --base-url $BASE --fixture $F/ws.json --output $F/ws-sessions.json --workers 2
+ulimit -n 8192
+.venv/bin/python loadtests/websocket_benchmark.py --base-url $BASE --fixture $F/ws-sessions.json --output $R/websocket.json
+sleep 15
+.venv/bin/python scripts/check_consistency.py --event-id <event_id from ws.json> --require-settled --output $R/websocket-consistency.json
 ```
 
-The audit runs in a read-only repeatable-read transaction and reports duplicate sold seats, order totals/counts, paid seat/payment ownership, active holds, effective user quotas and event/outbox consistency. Expired-but-not-cleaned records are informational because lease cleanup is asynchronous. Unpublished outbox and pending reversals become failures with `--require-settled`.
+2,000 sockets authenticate (first frame `{type:auth}`) before measurement; the first fixture account then reserves and cancels one seat repeatedly for 60 s. A change fails unless every subscriber sees it within 10 s; disconnects also fail the scenario. Each delivery is logged in `websocket.deliveries.jsonl`; latency is HTTP mutation start to observed frame on the client's monotonic clock (nearest-rank percentiles). The script also samples `docker stats` for every `ticket-load-*` container into `websocket-resources.csv` while the benchmark runs.
 
-## B: 2000 subscribers plus real mutations
-
-Use a **fresh booking fixture** and authenticated session manifest. Increase the client process descriptor limit to at least 2256. The subscriber account can be shared because the requirement concerns concurrent connections; the mutating account is its first fixture user. It repeatedly reserves and cancels one available seat to avoid exhausting its quota.
+### 100K import
 
 ```bash
-ulimit -n 4096
-.venv/bin/python loadtests/websocket_benchmark.py --base-url http://localhost:8080 \
-  --fixture loadtests/fixtures/ws-sessions.json --output loadtests/results/websocket.json
+.venv/bin/python scripts/generate_load_data.py seats --output $F/import
+LOAD_TOKEN=<user token> .venv/bin/python loadtests/import_benchmark.py --base-url $BASE --file $F/import/seats.csv --output $R/import-csv.json
+LOAD_TOKEN=<user token> .venv/bin/python loadtests/import_benchmark.py --base-url $BASE --file $F/import/seats.json --output $R/import-json.json
 ```
 
-2000 sockets authenticate before measurement. One consistent baseline snapshot is shared by the harness while each connection separately receives/validates versions; gap recovery fetches a fresh HTTP snapshot. The steady interval is 60 seconds and includes reserve/cancel mutations. A phase fails unless all subscribers see the corresponding change within 10 seconds; disconnects also fail the scenario. Each observed delivery is stored in `.deliveries.jsonl` with connection, phase, version and monotonic latency. Latency is mutation HTTP initiation to observed WebSocket frame, including API processing; p50/p95/p99 use nearest-rank, not server-side timestamps. Gaps/resyncs and failed delivery counts are explicit. The 5-second version heartbeat is a protocol feature, not a promise of recovery during network outages.
+Each run creates its own draft activity, uploads, polls the job every 500 ms and passes only with 100,000 inserted rows in at most 60 s.
 
-## 100K import
-
-```bash
-.venv/bin/python scripts/generate_load_data.py seats --output loadtests/fixtures/import
-# LOAD_TOKEN is an authorized creator token obtained before measurement.
-.venv/bin/python loadtests/import_benchmark.py --base-url http://localhost:8080 \
-  --file loadtests/fixtures/import/seats.csv --output loadtests/results/import.json
-```
-
-The benchmark creates a fresh draft event with zone A, uploads the file, then polls the real job every 500ms. It records upload/accept time, every raw job response, acceptance-to-observed-finish and total elapsed. Success requires 100000 inserted rows and total ≤60 seconds; acceptance-to-finish is separately available. Test JSON by running again with the generated JSON file; each run creates its own event. Sample small valid and invalid files live under sample_data/.
-
-## 500K-order Excel within a 512MiB API instance
+### 500K-order Excel within a 512 MiB API process
 
 ```bash
-.venv/bin/python scripts/generate_load_data.py report --output loadtests/fixtures/report.json
-# Set DATABASE_URL to the same disposable DB, plus normal app environment.
-PYTHONPATH=backend .venv/bin/python loadtests/limited_api.py --port 8000 &
+.venv/bin/python scripts/generate_load_data.py report --output $F/report.json
+DATABASE_URL=$LOAD_DATABASE_URL REDIS_URL=redis://127.0.0.1:1/0 PYTHONPATH=backend \
+  .venv/bin/python loadtests/limited_api.py --port 8000 &
 API_PID=$!
-# LOAD_TOKEN must belong to the report event owner or an Admin/Viewer on this DB.
-.venv/bin/python loadtests/report_benchmark.py --base-url http://localhost:8000 \
-  --event-id EVENT_UUID --api-pid "$API_PID" --output loadtests/results/report.json
+LOAD_TOKEN=<admin token from http://127.0.0.1:8000> .venv/bin/python loadtests/report_benchmark.py \
+  --base-url http://127.0.0.1:8000 --event-id <event_id from report.json> --api-pid $API_PID --output $R/report.json
+kill $API_PID
 ```
 
-`limited_api.py` runs exactly one API process with a hard **address-space** ceiling of 512MiB, stricter than resident memory. This may expose allocation/threads limits that a container RSS limit does not; document that distinction in results. The client records actual peak API VmRSS from /proc every 20ms, checks the enforced limit, streams the download to disk, and scans the workbook in read-only mode. It verifies Summary/Zones/Orders, 500000 order rows and Asia/Taipei headers. Do not point it at an unrestricted API PID and claim a memory-limit pass. Container/cgroup execution is another valid method but requires its own complete API-instance memory evidence.
+`limited_api.py` execs a single uvicorn process (no `--workers`, which would fork a child and measure the wrong PID) under a hard 512 MiB **address-space** limit, stricter than resident memory. The client samples that PID's VmRSS every 20 ms, verifies the enforced limit and that there are no child processes, streams the download to disk and checks Summary/Zones/Orders, 500,000 order rows, numeric money and `Asia/Taipei` headers. Telemetry is spooled locally (Redis deliberately unreachable) so the process measures the export only. Set `LIMITED_API_PORT` for the script if port 8000 is busy.
 
-Fixtures contain 500000 one-ticket orders, mostly historical CANCELED/EXPIRED, plus a bounded PAID subset: at most four paid tickets per user and one paid owner per seat. Canceled/expired historical items may reuse seats; sold items cannot. Prices are 100 TWD + 5 TWD service fee. This gives nonzero sales and historical rows without violating quota or inventing 500000 sold seats in a 10000-seat event. Initial fixture state has event version zero and no fabricated transition history.
+Fixtures contain 500,000 one-ticket orders, mostly historical CANCELED/EXPIRED plus a bounded PAID subset (at most four paid tickets per user, one paid owner per seat), priced 100 TWD + 5 TWD fee.
 
 ## Evidence boundary and sources
 
-CLI/fixture tests: `python3 -m unittest discover -s loadtests/tests -v`. They validate generation and command interfaces, not network performance. Socket restrictions, unavailable Docker daemon or missing dependencies must be recorded as unexecuted scenarios, never passing results. No benchmark numbers are committed here.
+CLI/fixture tests: `python3 -m unittest discover -s loadtests/tests -v`. They validate generation and command interfaces, not network performance. Unavailable Docker or missing dependencies must be recorded as unexecuted scenarios, never passing results. No benchmark numbers are committed here.
 
 - [Locust API](https://docs.locust.io/en/stable/api.html) and [headless execution](https://docs.locust.io/en/stable/running-without-web-ui.html).
 - [websockets asyncio client](https://websockets.readthedocs.io/en/stable/reference/asyncio/client.html).

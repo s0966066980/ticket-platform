@@ -1,6 +1,8 @@
 # Load-test overlay: publishes PostgreSQL on localhost so fixture generation and
 # the consistency audit can reach the disposable load database directly.
-# Usage: docker compose -p ticket-load --env-file .env.load -f docker-compose.yml -f docker-compose.load.yml up -d --build
+# Use scripts/loadtest.sh, which runs:
+#   docker compose -p ticket-load --env-file loadtests/load.env \
+#     -f docker-compose.yml -f docker-compose.load.yml ...
 services:
   postgres:
-    ports: ['127.0.0.1:55432:5432']
+    ports: ['127.0.0.1:${LOAD_DB_PORT:-55433}:5432']
