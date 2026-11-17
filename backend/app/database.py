@@ -16,6 +16,8 @@ def get_engine() -> Engine:
         pool_pre_ping=True,
         pool_size=settings.database_pool_size,
         max_overflow=settings.database_max_overflow,
+        # Shed load as a retryable 503 instead of queueing requests for 30 s.
+        pool_timeout=settings.database_pool_timeout_seconds,
         connect_args={"connect_timeout": 5},
     )
 

@@ -206,6 +206,7 @@ export default function EventDetail({
     >([]),
     loading = useRef(false),
     alive = useRef(true),
+    lastFrameAt = useRef(0),
     socketRef = useRef<WebSocket | null>(null);
   async function loadEvent() {
     const item = await request<TicketEvent>(`/events/${id}`);
@@ -260,6 +261,7 @@ export default function EventDetail({
       );
       socketRef.current = socket;
       socket.onopen = () =>
+        (lastFrameAt.current = Date.now()) &&
         socket.send(
           JSON.stringify({
             type: "auth",
@@ -267,6 +269,7 @@ export default function EventDetail({
           }),
         );
       socket.onmessage = ({ data }) => {
+        lastFrameAt.current = Date.now();
         try {
           const frame = JSON.parse(data);
           if (frame.type === "auth_ok") {
@@ -322,8 +325,16 @@ export default function EventDetail({
     }
     connect();
     const timer = setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN)
-        socket.send(JSON.stringify({ type: "heartbeat" }));
+      if (socket.readyState !== WebSocket.OPEN) return;
+      // The server pushes a version heartbeat at least every 5 s. A half-open
+      // connection delivers nothing: treat 15 s of silence as out of sync and
+      // reconnect instead of trusting a stale seat map.
+      if (lastFrameAt.current && Date.now() - lastFrameAt.current > 15000) {
+        setSynced(false);
+        socket.close();
+        return;
+      }
+      socket.send(JSON.stringify({ type: "heartbeat" }));
     }, 5000);
     void request<{ version: number; items: Seat[] }>(`/events/${id}/seats`)
       .then((data) => {

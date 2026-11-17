@@ -34,8 +34,9 @@ class Settings(BaseSettings):
     alert_outbox_lag_seconds: float = 10.0
     alert_min_requests: int = 20
     alert_sustain_seconds: float = 15.0
-    database_pool_size: int = 10
-    database_max_overflow: int = 10
+    database_pool_size: int = 20
+    database_max_overflow: int = 20
+    database_pool_timeout_seconds: float = 5.0
     seed_admin_email: str = "admin@example.test"
     seed_admin_password: str = "Admin-test-123!"
     seed_user_email: str = "user@example.test"
