@@ -19,3 +19,5 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 
 - Ticket04 session/auth source integrated with compile/diff checks; HTTP/PG execution remains pending. [Ticket](issues/04-auth.md).
 - Frontier refinement: 04 auth -> 05 events and 10 reports. Reports depends on schema+auth rather than Booking implementation.
+
+13 CI depends01,02,03,04 (resolved); final delivery also depends13. Configure real PG16/Redis CI and report actual result when available.
