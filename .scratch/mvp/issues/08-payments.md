@@ -1,6 +1,6 @@
 # 08: Durable mock gateway and payment reconciliation
 
-Status: open
+Status: claimed
 Triage: ready-for-agent
 Blocked by: 06
 
