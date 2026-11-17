@@ -219,6 +219,15 @@ def test_stream_path_commits_to_postgres_before_acknowledging(telemetry_env, db_
     monkeypatch.setenv('REDIS_URL', url)
     get_settings.cache_clear()
     client = Redis.from_url(url, decode_responses=True)
+    # The handoff only trusts a Redis whose AOF is fsynced on every write (as the
+    # compose service is configured). CI's service container starts without it,
+    # so enable it for this test and restore the previous settings afterwards.
+    previous = {key: client.config_get(key)[key] for key in ('appendonly', 'appendfsync')}
+    try:
+        client.config_set('appendonly', 'yes')
+        client.config_set('appendfsync', 'always')
+    except RedisError as exc:
+        pytest.skip(f'cannot enable AOF on {url}: {exc}')
     client.delete(observability.STREAM)
     app = create_app()
     app.dependency_overrides[get_session] = lambda: (yield from (session for session in [db_session]))
@@ -235,6 +244,8 @@ def test_stream_path_commits_to_postgres_before_acknowledging(telemetry_env, db_
     assert row is not None and row.status_code == 401 and row.business_outcome == 'UNAUTHENTICATED'
     assert collect_telemetry()['stream'] == 0
     client.delete(observability.STREAM)
+    for key, value in previous.items():
+        client.config_set(key, value)
 
 
 # --- per-second metrics -------------------------------------------------------------
