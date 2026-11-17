@@ -2,7 +2,9 @@
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, update
+import json
+
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -11,9 +13,9 @@ from app.auth import Principal, ensure_owner
 from app.config import get_settings
 from app.database import db_now, new_session
 from app.errors import AppError
-from app.events import get_event, lock_event_stream
+from app.events import get_event
 from app.idempotency import Claim, OperationResult, claim_key, complete_key, lock_claim, prepare_claim, reject_key, release_key
-from app.models import EventStream, Order, OrderItem, OutboxEvent, Payment, Seat, SeatEvent, UserEventQuota, Zone
+from app.models import Order, OrderItem, OutboxEvent, Payment, Seat, SeatEvent, UserEventQuota, Zone
 
 
 def lock_quota(session: Session, user_id: UUID, event_id: UUID) -> UserEventQuota:
@@ -39,21 +41,35 @@ def load_seat_changes(session: Session, seat_ids: list[UUID]) -> list[dict]:
     } for row in rows]
 
 
-def emit_seat_changes(session: Session, event_id: UUID, stream: EventStream, changes: list[dict], request_id: str) -> dict | None:
-    """Requires the caller's final event_stream lock; never takes earlier locks.
+def emit_seat_changes(session: Session, event_id: UUID, changes: list[dict], request_id: str, *, require_on_sale: bool = False) -> dict | None:
+    """Allocate the next activity version and record the change in the shortest possible serialized section.
 
-    Outbox payload is the WebSocket protocol frame. SeatEvent stores the same
-    envelope as an audit object. The caller commits it with its seat changes.
+    Every buyer of one activity serializes here, so the section is three round
+    trips: (1) an atomic UPDATE of ``event_streams`` takes the row lock and hands
+    back the version, (2) one statement re-reads the activity under that lock
+    (a concurrent soft delete or unpublish inserts nothing and we roll back) and
+    writes ``seat_events`` plus the Outbox row, (3) the caller's COMMIT. All
+    other work, including the HTTP response body, must be flushed before.
     """
     if not changes:
         return None
-    if stream.event_id != event_id:
-        raise ValueError('Event stream does not match seat mutation')
-    stream.current_version += 1
-    payload = {'type': 'seat_changed', 'event_id': str(event_id), 'version': stream.current_version, 'changes': changes}
-    session.add(SeatEvent(event_id=event_id, version=stream.current_version, changes=payload, request_id=request_id))
-    session.add(OutboxEvent(kind='seat_changed', aggregate_id=event_id, aggregate_version=stream.current_version, payload=payload, request_id=request_id))
-    session.flush()
+    session.flush()  # Nothing of ours may be sent while the version lock is held.
+    version = session.scalar(text('UPDATE event_streams SET current_version = current_version + 1, updated_at = clock_timestamp() WHERE event_id = :event_id RETURNING current_version'), {'event_id': event_id})
+    if version is None:
+        raise AppError(500, 'EVENT_STREAM_MISSING', 'Activity state is incomplete')
+    payload = {'type': 'seat_changed', 'event_id': str(event_id), 'version': version, 'changes': changes}
+    guard = " AND e.status = 'PUBLISHED' AND e.sales_start <= clock_timestamp() AND clock_timestamp() < e.sales_end" if require_on_sale else ''
+    inserted = session.scalar(text(f"""
+        WITH ok AS (SELECT 1 FROM events e WHERE e.id = :event_id AND e.deleted_at IS NULL{guard}),
+             audit AS (INSERT INTO seat_events (event_id, version, changes, occurred_at, request_id)
+                       SELECT :event_id, :version, CAST(:payload AS jsonb), clock_timestamp(), :request_id FROM ok RETURNING version),
+             outbox AS (INSERT INTO outbox_events (id, kind, aggregate_id, aggregate_version, payload, request_id, available_at, attempts, generation, created_at)
+                        SELECT gen_random_uuid(), 'seat_changed', :event_id, :version, CAST(:payload AS jsonb), :request_id, clock_timestamp(), 0, 0, clock_timestamp() FROM ok RETURNING id)
+        SELECT count(*) FROM audit"""), {'event_id': event_id, 'version': version, 'payload': json.dumps(payload, separators=(',', ':')), 'request_id': request_id})
+    if not inserted:
+        if require_on_sale:
+            raise AppError(409, 'NOT_ON_SALE', 'This activity is not currently accepting new orders')
+        raise AppError(404, 'NOT_FOUND', 'Activity not found')
     return payload
 
 
@@ -160,14 +176,11 @@ def _reserve(session: Session, principal: Principal, event_id: UUID, selection: 
         zone = zones[seat.zone_id]
         session.add(OrderItem(order_id=order.id, event_id=event_id, seat_id=seat.id, zone_code_snapshot=zone.code, row_label_snapshot=seat.row_label, seat_number_snapshot=seat.seat_number, unit_price_twd=zone.price_twd))
     session.flush()
-    stream = lock_event_stream(session, event_id)  # Final protection lock: serializes version assignment and the deletion race.
-    event = get_event(session, event_id, principal)  # Re-read under the stream lock: a concurrent soft delete raises 404 and rolls everything back.
-    commit_now = db_now(session)  # After ALL locks, including event stream.
-    if event.status != 'PUBLISHED' or not event.sales_start <= commit_now < event.sales_end:
-        raise AppError(409, 'NOT_ON_SALE', 'This activity is not currently accepting new orders')
-    emit_seat_changes(session, event_id, stream, load_seat_changes(session, changed), request_id)
     result = OperationResult(201, order_json(session, order, now=now))
     complete_key(session, record, result, order_id=order.id)
+    # Last: the per-activity version section re-checks publication, sale window
+    # and soft deletion under the lock, so a concurrent delete rolls all of this back.
+    emit_seat_changes(session, event_id, load_seat_changes(session, changed), request_id, require_on_sale=True)
     session.commit()
     return result
 
@@ -214,8 +227,7 @@ def _finalize_pending(session: Session, order_id: UUID, *, principal: Principal 
         session.commit()
         return result, False
     locked_seats = lock_order_seats(session, order)
-    stream = lock_event_stream(session, order.event_id)
-    now = db_now(session)
+    now = db_now(session)  # After the quota, order and seat locks.
     expired = order.expires_at <= now
     if expiry_only and not expired:
         result = order_json(session, order, now=now)
@@ -229,9 +241,8 @@ def _finalize_pending(session: Session, order_id: UUID, *, principal: Principal 
         order.canceled_at = now
     # A previous order can never release a seat already reclaimed by a newer one.
     changed = list(session.scalars(update(Seat).where(Seat.id.in_([seat.id for seat in locked_seats]), Seat.event_id == order.event_id, Seat.current_order_id == order.id, Seat.status == 'HELD').values(status='AVAILABLE', current_order_id=None, held_by=None, held_until=None, version=Seat.version + 1).returning(Seat.id).execution_options(synchronize_session=False)))
-    emit_seat_changes(session, order.event_id, stream, load_seat_changes(session, changed), request_id)
-    session.flush()
     result = order_json(session, order, now=now)
+    emit_seat_changes(session, order.event_id, load_seat_changes(session, changed), request_id)
     session.commit()
     return result, True
 

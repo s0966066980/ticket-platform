@@ -40,7 +40,6 @@ from app.booking import emit_seat_changes, get_order, load_seat_changes, lock_or
 from app.config import get_settings
 from app.database import db_now, new_session
 from app.errors import AppError
-from app.events import lock_event_stream
 from app.idempotency import OperationResult, claim_key, complete_key, lock_claim, prepare_claim, reject_key, release_key, request_hash
 from app.models import Order, OrderItem, OutboxEvent, Payment, PaymentCallback, Seat, ServiceLog
 
@@ -156,6 +155,7 @@ def process_callback(session: Session, payload: CallbackPayload | dict) -> dict:
     event = payload if isinstance(payload, CallbackPayload) else CallbackPayload.model_validate(payload)
     normalized = event.model_dump(mode='json')
     digest = request_hash(normalized)
+    seat_changes: list[dict] = []
     order, payment = _context(session, event.payment_id)
     existing = session.scalar(select(PaymentCallback).where(PaymentCallback.provider_event_id == event.provider_event_id))
     if existing is not None:
@@ -180,8 +180,7 @@ def process_callback(session: Session, payload: CallbackPayload | dict) -> dict:
             result_code = 'FAILURE_ALREADY_TERMINAL'
     else:
         seats = lock_order_seats(session, order)
-        stream = lock_event_stream(session, order.event_id)
-        now = db_now(session)  # ALL required locks, including stream, have been obtained.
+        now = db_now(session)  # After the quota, order, payment and seat locks.
         if payment.status == 'REVERSED':
             result_code = 'ALREADY_REVERSED'
         elif order.status == 'PAID' and order.accepted_payment_id == payment.id:
@@ -200,7 +199,7 @@ def process_callback(session: Session, payload: CallbackPayload | dict) -> dict:
             order.status = 'PAID'
             order.accepted_payment_id = payment.id
             order.paid_at = now
-            emit_seat_changes(session, order.event_id, stream, load_seat_changes(session, changed), event.request_id)
+            seat_changes = load_seat_changes(session, changed)
             result_code = 'PAID'
         else:
             payment.succeeded_at = payment.succeeded_at or now
@@ -215,11 +214,12 @@ def process_callback(session: Session, payload: CallbackPayload | dict) -> dict:
                     reason = 'RESERVATION_STATE_CONFLICT'
                 identifiers = [seat.id for seat in seats]
                 released = list(session.scalars(update(Seat).where(Seat.id.in_(identifiers), Seat.current_order_id == order.id, Seat.status == 'HELD').values(status='AVAILABLE', current_order_id=None, held_by=None, held_until=None, version=Seat.version + 1).returning(Seat.id).execution_options(synchronize_session=False)))
-                emit_seat_changes(session, order.event_id, stream, load_seat_changes(session, released), event.request_id)
+                seat_changes = load_seat_changes(session, released)
             _queue_reversal(session, payment, now, reason)
             result_code = reason + '_REVERSAL_PENDING'
     session.add(PaymentCallback(provider_event_id=event.provider_event_id, payment_id=payment.id, payload_hash=digest, payload=normalized, processed_at=now, result_code=result_code, request_id=event.request_id))
     audit(session, event.request_id, 'backend', 'PAYMENT_CALLBACK', {'payment_id': str(payment.id), 'result': result_code}, now=now)
+    emit_seat_changes(session, order.event_id, seat_changes, event.request_id)  # Last: shortest version-lock section.
     session.commit()
     return {'status': 'processed', 'result': result_code, 'payment_id': str(payment.id)}
 
