@@ -74,13 +74,32 @@
 
 設定：`scripts/generate_load_data.py seats` 產生 100,000 列 CSV（1,292,033 bytes）與 JSON（6,392,003 bytes）；`loadtests/import_benchmark.py` 建立草稿活動、上傳、每 500 ms 輪詢 job 直到終態，記錄受理時間與完成時間。
 
-__IMPORT__
+### 結果（commit 39c5b66，2026-11-17 01:52 UTC；`loadtests/results/final/import-csv.json`、`import-json.json`）
+
+| 格式 | 檔案大小 | 上傳並受理 | 受理 → 觀察到完成 | 總耗時 | 新增列 | 60 秒內 |
+| --- | --- | --- | --- | --- | --- | --- |
+| CSV | 1,292,033 bytes | 0.02 s | 15.7 s | 15.7 s | 100,000 | 通過 |
+| JSON | 6,392,003 bytes | 0.03 s | 15.7 s | 15.7 s | 100,000 | 通過 |
+
+模式 `all_or_nothing`、錯誤列 0。耗時組成：檔案先完整持久化再受理（< 0.05 秒），worker 以租約領取後分批（`IMPORT_BATCH_SIZE=1000`）解析進 staging、驗證檔內重複與既有座位，最後在單一交易新增全部座位並發布 `resync_required` 事件；輪詢粒度 0.5 秒。CPU 主要在 worker 的 Python 解析與 PostgreSQL 寫入，未做並行化。接手前在較早 commit 的測量為 14.7 秒，差異在量測時同機其他容器的負載。
 
 ## Excel：500,000 筆訂單、API 記憶體上限 512 MiB
 
 設定：`scripts/generate_load_data.py report` 以 SQL 建立 500,000 筆一張票訂單（多數為歷史取消／逾時，已付款子集受限購約束）；`loadtests/limited_api.py` 以 `RLIMIT_AS = 512 MiB`（位址空間，比 RSS 更嚴）啟動單一 API 程序；`report_benchmark.py` 串流下載、每 20 ms 取樣 `/proc/<pid>/status` 的 VmRSS 峰值，並以唯讀模式掃描工作簿驗證三個工作表與 500,000 列。
 
-__EXCEL__
+### 結果（commit 66f2480，2026-11-17 02:09 UTC；`loadtests/results/final/report.json`）
+
+| 指標 | 值 |
+| --- | --- |
+| API 程序 | 單一 uvicorn 程序，`RLIMIT_AS` 硬上限 536,870,912 bytes（512 MiB），無子程序 |
+| 訂單數 | 500,000（Orders 工作表 500,000 列） |
+| 工作表 | Summary, Zones, Orders；表頭含 `Asia/Taipei`；金額欄 3 欄全為數值（非法儲存格 0） |
+| 檔案大小 | 32,226,972 bytes |
+| 串流下載耗時 | 32.5 s |
+| API 峰值 VmRSS（每 20 ms 取樣） | 105 MiB |
+| 結果 | 通過 |
+
+做法：Summary／Zones／Orders 三個工作表使用同一個 REPEATABLE READ 唯讀快照；Orders 以 server-side cursor 分批（1,000 列）讀取 Core 列而非 ORM 物件，OpenPyXL write-only 模式逐列寫入暫存檔，再以串流回應送出並刪除暫存檔。位址空間上限比 RSS 上限更嚴格（執行緒堆疊也計入），仍留有約 4 倍餘裕。第一次執行量到錯誤的程序（harness 以 `--workers 1` 啟動 uvicorn 使其成為 supervisor），修正後重跑。
 
 ## 故障實驗（非效能，補充 DESIGN Q2）
 

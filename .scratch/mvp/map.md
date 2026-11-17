@@ -36,3 +36,5 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 - Ticket07 recoverable import source integrated; compile/diff PASS, new import tests await actual GitHub CI. Bulk resync_required contract feeds realtime09. [Ticket](issues/07-imports.md).
 
 09 worker/feed also depends08 payment service entrypoints. 15 documentation depends01,02,03,04,05,06,10,12 and is independent of pending runtime code;11 reconciles/finalizes it afterallfeatures.
+
+- 2026-11-17 takeover: tickets 08, 09, 14 implemented and merged with real execution evidence; 11 and 15 closed after compose end-to-end, load scenarios A/B, 100K import and 512 MiB Excel runs. integration/mvp merged into main for delivery.

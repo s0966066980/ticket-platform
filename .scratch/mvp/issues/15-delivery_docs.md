@@ -1,6 +1,6 @@
 # 15: Evidence-grounded delivery documentation
 
-Status: claimed
+Status: resolved
 Triage: ready-for-agent
 Blocked by: 01, 02, 03, 04, 05, 06, 10, 12
 
@@ -10,4 +10,4 @@ DESIGN.md, LOADTEST.md, AI_USAGE.md, docs/architecture.* only. Read approved spe
 
 ## Answer
 
-Pending.
+Resolved 2026-11-17 by the takeover merger. DESIGN.md (six questions with real file/line references, the deliberately broken-protection output, kill -9 convergence, auth cost measurements), LOADTEST.md (machine spec, all four required scenarios actually executed with raw outputs under loadtests/results/final/, bottleneck analysis and tuning history), AI_USAGE.md (21 genuine AI defects with discovery and fix), docs/architecture.svg + docs/architecture.md. Numbers were transcribed from executed runs only.
