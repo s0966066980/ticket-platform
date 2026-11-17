@@ -115,7 +115,12 @@ def current_principal(
 ) -> Principal:
     if credentials is None or credentials.scheme.lower() != 'bearer':
         raise AppError(401, 'UNAUTHENTICATED', 'A valid login is required')
-    return authenticate_token(session, credentials.credentials)
+    principal = authenticate_token(session, credentials.credentials)
+    # Authentication performed only reads and Principal copies immutable values.
+    # Release this connection before catalog/seat snapshots or durable request
+    # claims open independent transactions, including when the pool is saturated.
+    session.rollback()
+    return principal
 
 
 # Stable alias used by feature modules that name their dependency by user role.

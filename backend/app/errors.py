@@ -6,25 +6,26 @@ from starlette.exceptions import HTTPException
 
 
 class AppError(Exception):
-    def __init__(self, status_code: int, code: str, message: str, details: Any = None):
+    def __init__(self, status_code: int, code: str, message: str, details: Any = None, *, headers: dict[str, str] | None = None):
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details
+        self.headers = headers or {}
         super().__init__(message)
 
 
-def error_response(request: Request, status: int, code: str, message: str, details=None):
+def error_response(request: Request, status: int, code: str, message: str, details=None, *, headers=None):
     payload = {"code": code, "message": message, "request_id": request.state.request_id}
     if details is not None:
         payload["details"] = details
-    return JSONResponse(payload, status_code=status, headers={"X-Request-ID": request.state.request_id})
+    return JSONResponse(payload, status_code=status, headers={**(headers or {}), "X-Request-ID": request.state.request_id})
 
 
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def application_error(request: Request, exc: AppError):
-        return error_response(request, exc.status_code, exc.code, exc.message, exc.details)
+        return error_response(request, exc.status_code, exc.code, exc.message, exc.details, headers=exc.headers)
 
     @app.exception_handler(HTTPException)
     async def http_error(request: Request, exc: HTTPException):
