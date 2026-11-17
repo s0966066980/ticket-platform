@@ -24,3 +24,5 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 
 - Ticket05 events/snapshot source integrated; compile/diff PASS, HTTP/PG execution pending. Unlocks 06 booking and 07 imports. [Ticket](issues/05-events.md).
 - Ticket12 load harness integrated; two load CLI plus four startup CLI checks passed, and load CLI discovery joins run_tests.sh. Full-scale measurements remain pending. [Ticket](issues/12-load_harness.md).
+
+- Ticket10 report source integrated; compile/diff PASS, PostgreSQL/HTTP/XLSX tests and 500K memory measurement remain pending. [Ticket](issues/10-reports.md).
