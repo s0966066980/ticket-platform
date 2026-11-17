@@ -489,3 +489,28 @@ def test_payment_failure_alert_counts_settled_mock_payments(observed_client, adm
     assert fired['payment_failure_rate']['details']['value'] == round(20 / 24, 4)
     later = t0 + timedelta(seconds=get_settings().metrics_window_seconds + 30)
     assert [alert['status'] for alert in evaluate_alerts(now=later) if alert['rule_id'] == 'payment_failure_rate'] == ['RESOLVED']
+
+
+def test_hourly_purge_removes_old_telemetry_but_keeps_alerts_and_open_claims(observed_client, admin_token, db_session):
+    from app.models import IdempotencyKey, ListSnapshot, Session as LoginSession, User
+    from app.observability import purge_expired
+    t0 = second(db_now(db_session))
+    old = t0 - timedelta(days=get_settings().telemetry_retention_days + 1)
+    seed_access_logs(db_session, 'replica-a', old, [5] * 3)
+    seed_access_logs(db_session, 'replica-a', t0 - timedelta(seconds=2), [5] * 2)
+    db_session.add(ServiceLog(request_id='old-trace', service='worker', level='INFO', code='X', context={}, observed_at=old))
+    db_session.add(SystemMetric(source_id='api:old', bucket_at=old, window_seconds=1, request_count=1, error_count=0, business_counts={}, latency_summary={}, connections=0, last_seen_at=old, data_complete=True))
+    db_session.add(Alert(rule_id='error_rate', scope='global', status='RESOLVED', first_seen_at=old, triggered_at=old, last_seen_at=old, resolved_at=old, details={}))
+    user = db_session.scalar(select(User).limit(1))
+    login = db_session.scalar(select(LoginSession).where(LoginSession.user_id == user.id).limit(1))
+    db_session.add(ListSnapshot(session_id=login.id, user_id=user.id, auth_version=user.auth_version, filter_spec={}, sort_spec={}, page_size=20, total_count=0, expires_at=t0 - timedelta(minutes=1)))
+    db_session.add(IdempotencyKey(user_id=user.id, operation='booking:x', key='done', request_hash='a' * 64, state='COMPLETED', generation=1, lease_until=old, expires_at=t0 - timedelta(hours=1), response_status=201, response_body={}))
+    db_session.add(IdempotencyKey(user_id=user.id, operation='booking:x', key='stuck', request_hash='b' * 64, state='IN_PROGRESS', generation=1, lease_until=old, expires_at=t0 - timedelta(hours=1)))
+    db_session.commit()
+    removed = purge_expired(now=t0, batch=2)
+    assert removed == {'access_logs': 3, 'service_logs': 1, 'system_metrics': 1, 'list_snapshots': 1, 'idempotency_keys': 1}
+    assert db_session.scalar(select(func.count(AccessLog.event_id))) == 2
+    assert db_session.scalar(select(func.count(Alert.id))) == 1, 'alert history survives'
+    assert [key.key for key in db_session.scalars(select(IdempotencyKey))] == ['stuck'], 'unfinished claims are never purged'
+    assert purge_expired(now=t0) == {name: 0 for name in removed}
+    assert observed_client.get('/api/v1/admin/alerts', headers=bearer(admin_token)).json()['items'][0]['status'] == 'RESOLVED'

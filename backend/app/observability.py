@@ -56,7 +56,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from redis import Redis
 from redis.exceptions import RedisError, ResponseError
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -894,6 +894,48 @@ def evaluate_alerts(session_factory=new_session, *, now: datetime | None = None)
         result = [alert_json(alert) for alert in touched]
         session.commit()
     return result
+
+
+# --- retention ------------------------------------------------------------------------
+
+def purge_expired(session_factory=new_session, *, now: datetime | None = None, batch: int = 20000) -> dict:
+    """Delete telemetry older than TELEMETRY_RETENTION_DAYS plus expired request bookkeeping.
+
+    Alerts are history and are never purged. Each table is trimmed in bounded
+    batches with its own commit so a large backlog never holds long locks;
+    the worker calls this hourly and keeps going until nothing is left.
+    Idempotency keys still IN_PROGRESS (an unresolved payment, for example)
+    are kept regardless of age.
+    """
+    from app.models import IdempotencyKey, ListSnapshot
+    settings = get_settings()
+    removed = {'access_logs': 0, 'service_logs': 0, 'system_metrics': 0, 'list_snapshots': 0, 'idempotency_keys': 0}
+    with session_factory() as session:
+        now = now or db_now(session)
+        cutoff = now - timedelta(days=settings.telemetry_retention_days)
+        targets = [
+            ('access_logs', AccessLog, AccessLog.event_id, AccessLog.observed_at < cutoff),
+            ('service_logs', ServiceLog, ServiceLog.event_id, ServiceLog.observed_at < cutoff),
+            ('system_metrics', SystemMetric, SystemMetric.bucket_at, SystemMetric.bucket_at < cutoff),
+            ('list_snapshots', ListSnapshot, ListSnapshot.id, ListSnapshot.expires_at < now),
+            ('idempotency_keys', IdempotencyKey, IdempotencyKey.id, (IdempotencyKey.expires_at < now) & (IdempotencyKey.state == 'COMPLETED')),
+        ]
+        for name, model, key, predicate in targets:
+            while True:
+                if model is SystemMetric:
+                    # Composite key: delete by bucket time, which is monotone per source.
+                    oldest = session.scalars(select(SystemMetric.bucket_at).where(predicate).order_by(SystemMetric.bucket_at).limit(batch)).all()
+                    if not oldest:
+                        break
+                    count = session.execute(delete(SystemMetric).where(SystemMetric.bucket_at <= oldest[-1], predicate)).rowcount
+                else:
+                    victims = select(key).where(predicate).limit(batch)
+                    count = session.execute(delete(model).where(key.in_(victims))).rowcount
+                session.commit()
+                removed[name] += count
+                if count < batch:
+                    break
+    return removed
 
 
 # --- worker convenience and CLI ---------------------------------------------------

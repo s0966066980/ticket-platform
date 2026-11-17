@@ -79,6 +79,7 @@ def _jobs() -> dict[str, list[Job]]:
         'imports': [
             Job('process_import_jobs', lambda: process_import_jobs(new_session, WORKER_ID, limit=1), poll),
             Job('cleanup_orphan_uploads', _cleanup_uploads, 3600),
+            Job('purge_expired', lambda: _call_optional('app.observability', 'purge_expired'), 3600),
         ],
         'telemetry': [
             Job('collect_telemetry', lambda: _call_optional('app.observability', 'collect_telemetry'), 1.0),

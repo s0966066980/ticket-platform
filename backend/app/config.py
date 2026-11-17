@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     ws_version_check_seconds: float = 5.0
     ws_queue_size: int = 256
     metrics_window_seconds: int = 60
+    telemetry_retention_days: int = 7
     display_timezone: str = "Asia/Taipei"
     alert_error_rate: float = 0.05
     alert_p95_seconds: float = 1.0
