@@ -1,6 +1,6 @@
 # 09: Workers, seat synchronization and observability
 
-Status: open
+Status: resolved
 Triage: ready-for-agent
 Blocked by: 06, 07, 08, 14
 
@@ -16,6 +16,8 @@ Use tdd red-green vertical slices at approved public seams. You are not alone in
 
 ## Answer
 
-Pending.
+Resolved 2026-11-17 by the takeover merger. Source: branch `ticket-09` (tip 1716aef, merged as 953c8f8). Delivered `backend/app/feed.py` (ordered Outbox publication under a per-activity advisory lock, Redis Pub/Sub fan-out, bounded per-connection queues closed with a resync code, batch session re-verification and DB version heartbeat every WS_VERSION_CHECK_SECONDS), `backend/app/api/feed.py`, `backend/app/worker.py` (threaded idempotent job groups, `--once`), frontend `resync_required` handling with a vitest, 8 feed tests and 3 worker tests on PostgreSQL 16 + Redis 7.
+
+Evidence: local full suite green; compose end-to-end smoke over Nginx observed seat_changed versions 2→3→4 and heartbeats on a live socket; worker SIGKILL between booking commit and publication converged 3.6 s after restart with no manual action.
 
 Observability source moved to independent ticket14;09 integrates its worker collector/middleware API and owns any needed frontend resync_required handling.

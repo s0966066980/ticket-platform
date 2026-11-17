@@ -1,6 +1,6 @@
 # 14: Independent observability pipeline
 
-Status: claimed
+Status: resolved
 Triage: ready-for-agent
 Blocked by: 04
 
@@ -10,4 +10,6 @@ backend/app/observability.py, backend/app/api/admin_metrics.py, backend/tests/te
 
 ## Answer
 
-Pending.
+Resolved 2026-11-17 by the takeover merger. Source: branch `ticket-14` (tip b9eb979, merged as cd77c41). Delivered the finished `backend/app/observability.py` (Redis Streams handoff with spool fallback, PG-before-XACK dedup, DB-anchored clock, per-source 1 s buckets, merged-sample percentiles, alert rules with min-request and sustain gates, Nginx log ingest), `backend/app/api/admin_metrics.py`, the `install_observability` hook in main.py and 23 tests. Nine genuine defects found in the earlier draft are recorded for AI_USAGE.md.
+
+Evidence: full suite in the ticket worktree `111 passed` with Redis; merged suite `110 passed` locally. Compose-level verification is part of the delivery ticket.

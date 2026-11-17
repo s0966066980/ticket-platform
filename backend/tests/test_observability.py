@@ -211,7 +211,7 @@ def redis_available(url):
 
 
 def test_stream_path_commits_to_postgres_before_acknowledging(telemetry_env, db_session, monkeypatch):
-    url = os.environ.get('REDIS_URL_FOR_TESTS', 'redis://127.0.0.1:6379/0')
+    url = os.environ.get('REDIS_URL_FOR_TESTS') or os.environ.get('REDIS_URL') or 'redis://127.0.0.1:6379/0'
     if not redis_available(url):
         pytest.skip(f'Redis 7 not reachable at {url}; stream path unverified in this run')
     monkeypatch.setenv('REDIS_URL', url)

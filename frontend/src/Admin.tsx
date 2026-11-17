@@ -20,12 +20,12 @@ import { request, mutate, date, type User, type Page } from "./api";
 import { Notice, Empty } from "./App";
 interface Metric {
   bucket_at: string;
-  rps: number;
-  p50_ms: number;
-  p95_ms: number;
+  rps: number | null;
+  p50_ms: number | null;
+  p95_ms: number | null;
   p99_ms: number;
-  error_rate: number;
-  connections: number;
+  error_rate: number | null;
+  connections: number | null;
 }
 interface Alert {
   id: string;
@@ -166,29 +166,33 @@ export default function Admin() {
       setLoading(false);
     }
   }
-  const latest = metrics.at(-1);
+  // Seconds without a persisted observation carry null values (collector lag
+  // or no live source) and must show as missing, never as zero.
+  const latest = [...metrics].reverse().find((m) => m.rps !== null) ?? metrics.at(-1);
+  const show = (value: number | null | undefined, digits: number, scale = 1) =>
+    value === null || value === undefined ? "—" : (value * scale).toFixed(digits);
   const cards = [
     {
       title: "每秒請求",
-      value: latest ? latest.rps.toFixed(1) : "—",
+      value: show(latest?.rps, 1),
       unit: "RPS",
       icon: Activity,
     },
     {
       title: "p95 處理延遲",
-      value: latest ? latest.p95_ms.toFixed(0) : "—",
+      value: show(latest?.p95_ms, 0),
       unit: "ms",
       icon: Clock3,
     },
     {
       title: "系統錯誤率",
-      value: latest ? `${(latest.error_rate * 100).toFixed(2)}` : "—",
+      value: show(latest?.error_rate, 2, 100),
       unit: "%",
       icon: TriangleAlert,
     },
     {
       title: "即時連線",
-      value: latest ? String(latest.connections) : "—",
+      value: show(latest?.connections, 0),
       unit: "connections",
       icon: Radio,
     },
