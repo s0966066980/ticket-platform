@@ -34,6 +34,15 @@ def setup_order(client,db_session,count=1,price=100):
     return headers,event,order
 
 
+def setup_order_for(client,db_session,email,event):
+    from app.models import Seat
+    headers,user=account(client,email)
+    seat=Seat(event_id=UUID(event["id"]),zone_id=UUID(event["zones"][0]["id"]),row_label="9",seat_number=email)
+    db_session.add(seat);db_session.commit()
+    order=client.post("/api/v1/events/"+event["id"]+"/bookings",headers={**headers,"Idempotency-Key":str(uuid4())},json={"seat_ids":[str(seat.id)]}).json()
+    return headers,event,order
+
+
 def pay(client,headers,order,outcome="success",key=None,delay=0):
     return client.post("/api/v1/orders/"+order["id"]+"/payments",headers={**headers,"Idempotency-Key":key or str(uuid4())},json={"outcome":outcome,"delay_seconds":delay})
 
@@ -105,3 +114,125 @@ def test_canceled_or_expired_order_is_not_payable(client,db_session):
     expired=pay(client,headers,order)
     assert expired.status_code==409
     assert expired.json()["code"]=="ORDER_NOT_PAYABLE"
+
+
+def sign(path,body,*,secret=None,timestamp=None,method="POST"):
+    from app.config import get_settings
+    from app.payments import signature
+    timestamp=timestamp or str(int(time.time()))
+    return {"Content-Type":"application/json","X-Gateway-Timestamp":timestamp,"X-Gateway-Signature":signature(secret or get_settings().gateway_secret,timestamp,method,path,body)}
+
+
+def callback_body(payment_id,order,status="SUCCEEDED",event_id=None,charge_id=None,**overrides):
+    payload={"provider_event_id":event_id or "evt-"+uuid4().hex,"payment_id":payment_id,"order_id":order["id"],"provider_charge_id":charge_id or "ch-"+payment_id,"amount_twd":order["total_twd"],"currency":"TWD","status":status,"occurred_at":datetime.now(timezone.utc).isoformat(),"request_id":"req-"+uuid4().hex}
+    payload.update(overrides)
+    return json.dumps(payload,sort_keys=True,separators=(",",":")).encode()
+
+
+def deliver(client,body,**sign_options):
+    return client.post(CALLBACK_PATH,content=body,headers=sign(CALLBACK_PATH,body,**sign_options))
+
+
+def seat_states(client,headers,event):
+    return [seat["status"] for seat in client.get("/api/v1/events/"+event["id"]+"/seats",headers=headers).json()["items"]]
+
+
+def test_successful_callback_marks_order_paid_and_emits_next_seat_version(client,db_session):
+    from sqlalchemy import select
+    from app.models import OrderItem,OutboxEvent,Payment,PaymentCallback
+    headers,event,order=setup_order(client,db_session,count=2)
+    payment_id=pay(client,headers,order).json()["id"]
+    body=callback_body(payment_id,order)
+    accepted=deliver(client,body)
+    assert accepted.status_code==200
+    assert accepted.json()=={"status":"processed","result":"PAID","payment_id":payment_id}
+    paid=client.get("/api/v1/orders/"+order["id"],headers=headers).json()
+    assert paid["status"]=="PAID"
+    assert paid["paid_at"] is not None
+    assert paid["payments"]==[{"id":payment_id,"status":"SUCCEEDED"}]
+    assert seat_states(client,headers,event)==["SOLD","SOLD"]
+    assert client.get("/api/v1/events/"+event["id"]+"/version",headers=headers).json()["version"]==2
+    outbox=db_session.scalars(select(OutboxEvent).where(OutboxEvent.kind=="seat_changed").order_by(OutboxEvent.aggregate_version)).all()
+    assert [row.aggregate_version for row in outbox]==[1,2]
+    assert sorted(change["status"] for change in outbox[-1].payload["changes"])==["SOLD","SOLD"]
+    payment=db_session.get(Payment,UUID(payment_id))
+    assert payment.provider_charge_id=="ch-"+payment_id and payment.succeeded_at is not None
+    assert all(item.sold_at is not None for item in db_session.scalars(select(OrderItem).where(OrderItem.order_id==UUID(order["id"]))))
+    record=db_session.scalar(select(PaymentCallback))
+    assert record.result_code=="PAID" and record.payment_id==UUID(payment_id)
+    assert client.post("/api/v1/orders/"+order["id"]+"/cancel",headers=headers).status_code==409
+    assert pay(client,headers,order).json()["code"]=="ORDER_NOT_PAYABLE"
+
+
+def test_failed_callback_keeps_order_pending_and_allows_retry_until_deadline(client,db_session):
+    headers,event,order=setup_order(client,db_session)
+    first=pay(client,headers,order,outcome="failure").json()["id"]
+    assert pay(client,headers,order).json()["code"]=="PAYMENT_IN_PROGRESS"
+    failed=deliver(client,callback_body(first,order,status="FAILED"))
+    assert failed.status_code==200
+    assert failed.json()["result"]=="PAYMENT_FAILED"
+    pending=client.get("/api/v1/orders/"+order["id"],headers=headers).json()
+    assert pending["status"]=="PENDING_PAYMENT"
+    assert pending["expires_at"]==order["expires_at"]
+    assert pending["payments"]==[{"id":first,"status":"FAILED"}]
+    assert seat_states(client,headers,event)==["HELD"]
+    retry=pay(client,headers,order)
+    assert retry.status_code==202
+    assert deliver(client,callback_body(retry.json()["id"],order)).json()["result"]=="PAID"
+    paid=client.get("/api/v1/orders/"+order["id"],headers=headers).json()
+    assert paid["status"]=="PAID"
+    assert [p["status"] for p in paid["payments"]]==["FAILED","SUCCEEDED"]
+
+
+def test_duplicate_callback_replays_and_conflicting_event_id_is_rejected(client,db_session):
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    body=callback_body(payment_id,order,event_id="evt-fixed")
+    first=deliver(client,body)
+    assert first.status_code==200
+    second=deliver(client,body)
+    assert second.status_code==200
+    assert second.json()==first.json()
+    assert client.get("/api/v1/events/"+event["id"]+"/version",headers=headers).json()["version"]==2
+    conflict=deliver(client,callback_body(payment_id,order,event_id="evt-fixed",status="FAILED"))
+    assert conflict.status_code==409
+    assert conflict.json()["code"]=="CALLBACK_EVENT_CONFLICT"
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["status"]=="PAID"
+
+
+def test_callback_requires_fresh_service_signature_not_user_token(client,db_session):
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    body=callback_body(payment_id,order)
+    missing=client.post(CALLBACK_PATH,content=body,headers={**headers,"Content-Type":"application/json"})
+    assert missing.status_code==401
+    assert missing.json()["code"]=="INVALID_GATEWAY_SIGNATURE"
+    forged=deliver(client,body,secret="not-the-shared-secret")
+    assert forged.status_code==401
+    expired=deliver(client,body,timestamp=str(int(time.time())-3600))
+    assert expired.status_code==401
+    assert expired.json()["code"]=="EXPIRED_GATEWAY_SIGNATURE"
+    tampered=client.post(CALLBACK_PATH,content=body.replace(b'"SUCCEEDED"',b'"FAILED"'),headers=sign(CALLBACK_PATH,body))
+    assert tampered.status_code==401
+    wrong_path=client.post(CALLBACK_PATH,content=body,headers=sign("/api/v1/other",body))
+    assert wrong_path.status_code==401
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["status"]=="PENDING_PAYMENT"
+    assert deliver(client,b'{"nope":1}').status_code==422
+    assert deliver(client,body).status_code==200
+
+
+def test_callback_with_wrong_amount_or_order_is_rejected_without_side_effects(client,db_session):
+    headers,event,order=setup_order(client,db_session)
+    other_headers,_,other=setup_order_for(client,db_session,"other@example.test",event)
+    payment_id=pay(client,headers,order).json()["id"]
+    amount=deliver(client,callback_body(payment_id,order,amount_twd=order["total_twd"]-1))
+    assert amount.status_code==409
+    assert amount.json()["code"]=="PAYMENT_MISMATCH"
+    wrong_order=deliver(client,callback_body(payment_id,order,order_id=other["id"]))
+    assert wrong_order.status_code==409
+    assert wrong_order.json()["code"]=="PAYMENT_MISMATCH"
+    unknown=deliver(client,callback_body(str(uuid4()),order))
+    assert unknown.status_code==404
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["status"]=="PENDING_PAYMENT"
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["payments"]==[{"id":payment_id,"status":"PENDING"}]
+    assert deliver(client,callback_body(payment_id,order)).json()["result"]=="PAID"
