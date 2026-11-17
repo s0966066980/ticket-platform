@@ -1,5 +1,5 @@
 """Observability checks at the HTTP, collector-CLI and PostgreSQL seams (A16, A17, A19)."""
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -20,7 +20,7 @@ from app.database import db_now, get_engine, get_session
 from app.main import create_app
 from app.models import AccessLog, Alert, OutboxEvent, ServiceLog, SystemMetric
 from app.observability import (
-    INSTANCE_ID, collect_telemetry, emit_connection_gauge, evaluate_alerts, ingest_events,
+    INSTANCE_ID, collect_telemetry, connection_delta, emit_connection_gauge, evaluate_alerts, ingest_events,
     record_service_log, refresh_metrics,
 )
 from tests.test_auth import bearer, login, seed_test_accounts
@@ -233,3 +233,197 @@ def test_stream_path_commits_to_postgres_before_acknowledging(telemetry_env, db_
     assert row is not None and row.status_code == 401 and row.business_outcome == 'UNAUTHENTICATED'
     assert collect_telemetry()['stream'] == 0
     client.delete(observability.STREAM)
+
+
+# --- per-second metrics -------------------------------------------------------------
+
+def test_metrics_merge_samples_across_instances_and_do_not_report_gaps_as_zero(observed_client, admin_token, db_session):
+    base = second(db_now(db_session)) - timedelta(seconds=20)
+    # Two replicas, one second: merged samples 1..100 ms must give exact p50/p95/p99.
+    seed_access_logs(db_session, 'replica-a', base + timedelta(milliseconds=100), range(1, 51))
+    seed_access_logs(db_session, 'replica-b', base + timedelta(milliseconds=900), range(51, 101))
+    # Next second: 4 of 10 requests are 5xx, plus 3 business rejections that are not errors.
+    seed_access_logs(db_session, 'replica-a', base + timedelta(seconds=1), [10] * 6)
+    seed_access_logs(db_session, 'replica-a', base + timedelta(seconds=1), [10] * 4, status=500, error_kind='HTTP_5XX')
+    seed_access_logs(db_session, 'replica-b', base + timedelta(seconds=1), [10] * 3, status=409, business_outcome='SEAT_UNAVAILABLE')
+    refresh_metrics()
+
+    stored = {row.source_id: row for row in db_session.scalars(select(SystemMetric).where(SystemMetric.bucket_at == base))}
+    assert stored['api:replica-a'].request_count == 50 and stored['api:replica-b'].request_count == 50
+    assert stored['api:replica-a'].latency_summary['samples_us'][:3] == [1000, 2000, 3000]
+    # Refreshing again overwrites instead of accumulating.
+    refresh_metrics()
+    db_session.expire_all()
+    assert db_session.get(SystemMetric, ('api:replica-a', base, 1)).request_count == 50
+
+    body = observed_client.get('/api/v1/admin/metrics', headers=bearer(admin_token)).json()
+    assert len(body['items']) == get_settings().metrics_window_seconds
+    items = bucket_items(body)
+    merged = items[base.isoformat()]
+    assert merged['rps'] == 100
+    assert (merged['p50_ms'], merged['p95_ms'], merged['p99_ms']) == (50.0, 95.0, 99.0)
+    assert merged['error_rate'] == 0.0
+    mixed = items[(base + timedelta(seconds=1)).isoformat()]
+    assert mixed['rps'] == 13 and mixed['error_count'] == 4 and mixed['business_rejections'] == 3
+    assert mixed['error_rate'] == pytest.approx(4 / 13, abs=1e-6)
+    # Seconds nobody observed are reported as missing, not as zero traffic.
+    empty = items[(base + timedelta(seconds=5)).isoformat()]
+    assert empty['rps'] is None and empty['p95_ms'] is None and empty['error_rate'] is None and empty['connections'] is None
+    assert empty['data_complete'] is False
+    assert body['data_complete'] is False
+    # Seeded replicas never sent a heartbeat: the connection gauge is unknown, not 0.
+    assert merged['connections'] is None and merged['data_complete'] is False
+
+
+def test_unanchored_replica_clock_is_flagged_not_silently_misplaced(telemetry_env, db_session):
+    now = db_now(db_session)
+    slow_by_20s = now - timedelta(seconds=20)
+    anchored = {
+        'protocol': 1, 'kind': 'access', 'event_id': str(uuid4()), 'instance_id': 'replica-ok', 'request_id': 'trace-ok',
+        'observed_at': slow_by_20s.isoformat(), 'clock_error_us': 400, 'clock_valid': True, 'method': 'GET',
+        'route_template': '/api/v1/events', 'status_code': 200, 'duration_us': 1000,
+    }
+    unanchored = {**anchored, 'event_id': str(uuid4()), 'instance_id': 'replica-slow', 'request_id': 'trace-slow', 'clock_valid': False}
+    ingest_events([anchored, unanchored])
+    ok = db_session.scalar(select(AccessLog).where(AccessLog.request_id == 'trace-ok'))
+    slow = db_session.scalar(select(AccessLog).where(AccessLog.request_id == 'trace-slow'))
+    assert ok.observed_at == slow_by_20s and ok.clock_error_us == 400
+    assert abs((slow.observed_at - now).total_seconds()) < 5, 'placed at collection time, not 20 s in the past'
+    assert slow.clock_error_us >= observability.UNANCHORED_CLOCK_ERROR_US
+
+    refresh_metrics()
+    buckets = {row.source_id: row for row in db_session.scalars(select(SystemMetric).where(SystemMetric.source_id.like('api:%')))}
+    assert buckets['api:replica-ok'].bucket_at == second(slow_by_20s) and buckets['api:replica-ok'].data_complete is True
+    assert buckets['api:replica-slow'].data_complete is False
+
+
+def test_live_app_requests_classify_business_rejections_separately_from_system_errors(observed_client, admin_token, db_session):
+    assert connection_delta(2) == 2  # two WebSocket clients attached on this replica; emits a gauge
+    assert observed_client.get('/api/v1/admin/users').status_code == 401                       # business: UNAUTHENTICATED
+    assert observed_client.get('/api/v1/does-not-exist', headers=bearer(admin_token)).status_code == 404
+    assert observed_client.get('/api/v1/boom', headers=bearer(admin_token)).status_code == 500  # unhandled exception
+    assert observed_client.get('/api/v1/admin/users', headers=bearer(admin_token)).status_code == 200
+    emit_connection_gauge()
+    collect_telemetry()
+    refresh_metrics()
+
+    rows = {row.route_template: row for row in db_session.scalars(select(AccessLog))}
+    assert rows['/api/v1/admin/users'].status_code in (200, 401)
+    rejected = db_session.scalar(select(AccessLog).where(AccessLog.status_code == 401))
+    assert (rejected.business_outcome, rejected.error_kind) == ('UNAUTHENTICATED', None)
+    assert (rows['UNMATCHED'].status_code, rows['UNMATCHED'].business_outcome) == (404, 'NOT_FOUND')
+    assert (rows['/api/v1/boom'].status_code, rows['/api/v1/boom'].error_kind, rows['/api/v1/boom'].business_outcome) == (500, 'UNHANDLED_EXCEPTION', None)
+    assert all(row.clock_error_us <= observability.CLOCK_ERROR_LIMIT_US for row in rows.values())
+
+    body = observed_client.get('/api/v1/admin/metrics', headers=bearer(admin_token)).json()
+    observed = [item for item in body['items'] if item['rps']]
+    assert sum(item['rps'] for item in observed) >= 5
+    assert sum(item['error_count'] for item in observed) == 1
+    assert sum(item['business_rejections'] for item in observed) == 2
+    assert all(item['connections'] == 2 and item['data_complete'] for item in observed), 'heartbeats make these seconds complete'
+    assert connection_delta(-2) == 0
+
+
+# --- alerts ---------------------------------------------------------------------------
+
+def open_alerts(session):
+    return list(session.scalars(select(Alert).order_by(Alert.first_seen_at)))
+
+
+def test_error_rate_alert_needs_min_requests_and_sustain_then_resolves_keeping_history(observed_client, admin_token, db_session):
+    t0 = second(db_now(db_session))
+    sustain = timedelta(seconds=get_settings().alert_sustain_seconds)
+    seed_access_logs(db_session, 'replica-a', t0 - timedelta(seconds=2), [5] * 10, status=500, error_kind='HTTP_5XX')
+    refresh_metrics(now=t0)
+    assert evaluate_alerts(now=t0) == []
+    assert open_alerts(db_session) == [], '100% errors over 10 requests is below the 20-request gate'
+
+    seed_access_logs(db_session, 'replica-b', t0 - timedelta(seconds=1), [5] * 15, status=503, error_kind='HTTP_5XX')
+    refresh_metrics(now=t0)
+    evaluate_alerts(now=t0)
+    evaluate_alerts(now=t0 + sustain - timedelta(seconds=1))
+    pending = open_alerts(db_session)
+    assert [alert.status for alert in pending] == ['PENDING']
+    assert observed_client.get('/api/v1/admin/alerts', headers=bearer(admin_token)).json()['items'] == []
+
+    fired = evaluate_alerts(now=t0 + sustain + timedelta(seconds=1))
+    assert [(alert['rule_id'], alert['status']) for alert in fired] == [('error_rate', 'FIRING')]
+    assert fired[0]['details']['request_count'] == 25 and fired[0]['details']['value'] == 1.0
+    listed = observed_client.get('/api/v1/admin/alerts', headers=bearer(admin_token)).json()['items']
+    assert [(item['rule_id'], item['status']) for item in listed] == [('error_rate', 'FIRING')]
+    assert listed[0]['triggered_at'] == (t0 + sustain + timedelta(seconds=1)).isoformat()
+    assert listed[0]['resolved_at'] is None
+
+    # The window slides past the failures: the condition clears and history is kept.
+    later = t0 + timedelta(seconds=get_settings().metrics_window_seconds + 30)
+    resolved = evaluate_alerts(now=later)
+    assert [(alert['rule_id'], alert['status']) for alert in resolved] == [('error_rate', 'RESOLVED')]
+    assert evaluate_alerts(now=later + timedelta(seconds=1)) == []
+    listed = observed_client.get('/api/v1/admin/alerts', headers=bearer(admin_token)).json()['items']
+    assert [(item['status'], item['resolved_at']) for item in listed] == [('RESOLVED', later.isoformat())]
+
+    # A new episode opens a second row instead of reviving the old one.
+    seed_access_logs(db_session, 'replica-a', later + timedelta(seconds=5), [5] * 25, status=500, error_kind='HTTP_5XX')
+    refresh_metrics(now=later + timedelta(seconds=6))
+    evaluate_alerts(now=later + timedelta(seconds=6))
+    evaluate_alerts(now=later + timedelta(seconds=6) + sustain)
+    listed = observed_client.get('/api/v1/admin/alerts', headers=bearer(admin_token)).json()['items']
+    assert [item['status'] for item in listed] == ['FIRING', 'RESOLVED']
+    assert len({item['id'] for item in listed}) == 2
+
+
+def test_p95_latency_alert_uses_merged_samples_and_outbox_lag_alert_tracks_oldest_unpublished(observed_client, admin_token, db_session):
+    t0 = second(db_now(db_session))
+    sustain = timedelta(seconds=get_settings().alert_sustain_seconds)
+    # Each replica alone has p95 = 900 ms; merged, 4 of 20 samples exceed 1 s so p95 is 1500 ms.
+    seed_access_logs(db_session, 'replica-a', t0 - timedelta(seconds=3), [900] * 8 + [1500] * 2)
+    seed_access_logs(db_session, 'replica-b', t0 - timedelta(seconds=2), [900] * 8 + [1500] * 2)
+    refresh_metrics(now=t0)
+    evaluate_alerts(now=t0)
+    fired = evaluate_alerts(now=t0 + sustain)
+    assert [(alert['rule_id'], alert['status']) for alert in fired] == [('p95_latency', 'FIRING')]
+    assert fired[0]['details']['value_ms'] == 1500.0
+
+    db_session.add(OutboxEvent(kind='seat_changed', aggregate_id=uuid4(), aggregate_version=1, payload={}, request_id='trace-outbox', created_at=t0 - timedelta(seconds=30)))
+    db_session.commit()
+    pending = {alert['rule_id']: alert for alert in evaluate_alerts(now=t0 + sustain + timedelta(seconds=1))}
+    assert pending['outbox_lag']['status'] == 'PENDING' and pending['outbox_lag']['details']['value_seconds'] > 10
+    fired = {alert['rule_id']: alert for alert in evaluate_alerts(now=t0 + 2 * sustain + timedelta(seconds=1))}
+    assert fired['outbox_lag']['status'] == 'FIRING'
+    db_session.execute(OutboxEvent.__table__.update().values(published_at=func.clock_timestamp()))
+    db_session.commit()
+    cleared = {alert['rule_id']: alert for alert in evaluate_alerts(now=t0 + 2 * sustain + timedelta(seconds=2))}
+    assert cleared['outbox_lag']['status'] == 'RESOLVED' and cleared['p95_latency']['status'] == 'FIRING'
+    listed = observed_client.get('/api/v1/admin/alerts?limit=1', headers=bearer(admin_token)).json()
+    assert len(listed['items']) == 1 and listed['next_cursor']
+    rest = observed_client.get(f"/api/v1/admin/alerts?limit=1&cursor={listed['next_cursor']}", headers=bearer(admin_token)).json()
+    assert {item['rule_id'] for item in listed['items'] + rest['items']} == {'p95_latency', 'outbox_lag'}
+
+
+# --- Nginx trace ingestion ---------------------------------------------------------------
+
+def test_nginx_trace_rows_become_service_logs_with_durable_checkpoint(observed_client, admin_token, db_session, telemetry_env, tmp_path, monkeypatch):
+    log = tmp_path / 'access.jsonl'
+    monkeypatch.setenv('NGINX_LOG_PATH', str(log))
+    rows = [
+        {'service': 'nginx', 'request_id': 'nginx-abc123', 'method': 'GET', 'path': '/api/v1/admin/users', 'status': '200', 'duration_seconds': '0.012', 'observed_at': '2026-01-05T10:00:00+08:00'},
+        {'service': 'nginx', 'request_id': 'nginx-def456', 'method': 'POST', 'path': '/api/v1/auth/login', 'status': '401', 'duration_seconds': '0.004', 'observed_at': '2026-01-05T10:00:01+08:00'},
+    ]
+    log.write_text(''.join(json.dumps(row) + '\n' for row in rows) + '{"request_id": "partial"')
+    assert observed_client.get('/api/v1/admin/users', headers={**bearer(admin_token), 'X-Request-ID': 'nginx-abc123'}).status_code == 200
+
+    assert collect_telemetry()['nginx'] == 2
+    assert collect_telemetry()['nginx'] == 0, 'the checkpoint prevents re-reading complete lines'
+    with log.open('a') as handle:
+        handle.write(', "observed_at": "2026-01-05T10:00:02+08:00"}\n')
+    completed = run_cli('once')  # the worker-style pass: collect, refresh, evaluate
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)['collected']['nginx'] == 1
+    assert db_session.scalar(select(func.count()).select_from(ServiceLog).where(ServiceLog.service == 'nginx')) == 3
+    assert db_session.scalar(select(func.count()).select_from(AccessLog).where(AccessLog.request_id == 'nginx-def456')) == 0, 'proxy traces are not API metrics'
+    assert db_session.scalar(select(func.count()).select_from(AccessLog).where(AccessLog.request_id == 'nginx-abc123')) == 1
+
+    body = observed_client.get('/api/v1/admin/logs/nginx-abc123', headers=bearer(admin_token)).json()
+    assert [item['service'] for item in body['items']] == ['nginx', 'api']
+    assert body['items'][0]['context']['status'] == '200' and body['items'][0]['code'] == 'HTTP_PROXY_REQUEST'
+    assert datetime.fromisoformat(body['items'][0]['observed_at']) == datetime.fromisoformat('2026-01-05T10:00:00+08:00')
