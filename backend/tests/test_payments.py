@@ -321,3 +321,145 @@ def test_extra_success_on_paid_order_is_reversed_not_double_sold(client,db_sessi
     assert paid["status"]=="PAID"
     assert [p["status"] for p in paid["payments"]]==["REVERSAL_PENDING","SUCCEEDED"]
     assert client.get("/api/v1/events/"+event["id"]+"/version",headers=headers).json()["version"]==2
+
+
+def gateway_client():
+    from fastapi.testclient import TestClient
+    from app.gateway import app as gateway_app
+    # Not entered as a context manager: the lifespan delivery loop stays off and
+    # tests drive deliver_due_callbacks explicitly against the backend app.
+    return TestClient(gateway_app)
+
+
+def gateway_post(gateway,path,payload,**sign_options):
+    body=json.dumps(payload,sort_keys=True,separators=(",",":")).encode()
+    return gateway.post(path,content=body,headers=sign(path,body,**sign_options))
+
+
+def gateway_get(gateway,path):
+    return gateway.get(path,headers=sign(path,b"",method="GET"))
+
+
+def charge_request(payment_id,order,outcome="success",delay=0):
+    return {"payment_id":payment_id,"order_id":order["id"],"amount_twd":order["total_twd"],"currency":"TWD","outcome":outcome,"delay_seconds":delay,"request_id":"req-"+payment_id[:8]}
+
+
+def test_gateway_charge_is_idempotent_on_payment_key_and_requires_signature(client,db_session):
+    gateway=gateway_client()
+    assert gateway.get("/health").json()=={"status":"ok"}
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    request=charge_request(payment_id,order)
+    created=gateway_post(gateway,"/charges",request)
+    assert created.status_code==201
+    charge=created.json()
+    assert charge["payment_key"]==payment_id and charge["outcome"]=="SUCCESS" and charge["amount_twd"]==order["total_twd"]
+    assert charge["callback"]["payment_id"]==payment_id and charge["callback"]["status"]=="SUCCEEDED" and charge["callback"]["provider_charge_id"]==charge["id"]
+    assert charge["callback"]["provider_event_id"]==charge["provider_event_id"]
+    replay=gateway_post(gateway,"/charges",request)
+    assert replay.status_code==200
+    assert replay.json()["id"]==charge["id"] and replay.json()["provider_event_id"]==charge["provider_event_id"]
+    conflict=gateway_post(gateway,"/charges",{**request,"amount_twd":order["total_twd"]+1})
+    assert conflict.status_code==409
+    assert conflict.json()["code"]=="CHARGE_CONFLICT"
+    fetched=gateway_get(gateway,"/charges/by-key/"+payment_id)
+    assert fetched.status_code==200 and fetched.json()["callback"]==charge["callback"]
+    assert gateway_get(gateway,"/charges/by-key/"+str(uuid4())).status_code==404
+    body=json.dumps(request).encode()
+    assert gateway.post("/charges",content=body,headers={"Content-Type":"application/json"}).status_code==401
+    assert gateway.post("/charges",content=body,headers=sign("/charges",body,secret="wrong")).status_code==401
+    assert gateway.get("/charges/by-key/"+payment_id).status_code==401
+    assert gateway_post(gateway,"/charges",{**request,"outcome":"maybe"}).status_code==422
+
+
+def test_gateway_delayed_charge_settles_only_after_its_delay(client,db_session):
+    from sqlalchemy import update
+    from app.gateway import deliver_due_callbacks
+    from app.models import GatewayCharge
+    gateway=gateway_client()
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order,outcome="failure",delay=600).json()["id"]
+    charge=gateway_post(gateway,"/charges",charge_request(payment_id,order,outcome="failure",delay=600)).json()
+    assert charge["outcome"]=="PENDING" and "callback" not in charge
+    assert "callback" not in gateway_get(gateway,"/charges/by-key/"+payment_id).json()
+    assert deliver_due_callbacks(client=client)==0
+    db_session.execute(update(GatewayCharge).where(GatewayCharge.id==UUID(charge["id"])).values(next_callback_at=datetime.now(timezone.utc)-timedelta(seconds=1)));db_session.commit()
+    settled=gateway_get(gateway,"/charges/by-key/"+payment_id).json()
+    assert settled["outcome"]=="FAILURE" and settled["callback"]["status"]=="FAILED"
+    assert deliver_due_callbacks(client=client)==1
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["payments"]==[{"id":payment_id,"status":"FAILED"}]
+
+
+def test_gateway_reversal_is_idempotent_on_its_key(client,db_session):
+    gateway=gateway_client()
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    charge=gateway_post(gateway,"/charges",charge_request(payment_id,order)).json()
+    path="/charges/"+charge["id"]+"/reversal"
+    first=gateway_post(gateway,path,{"idempotency_key":"reverse:"+charge["id"]})
+    assert first.status_code==200
+    assert first.json()["status"]=="REVERSED" and first.json()["reversed_at"]
+    again=gateway_post(gateway,path,{"idempotency_key":"reverse:"+charge["id"]})
+    assert again.json()==first.json()
+    assert gateway_get(gateway,"/charges/by-key/"+payment_id).json()["reversed_at"]==first.json()["reversed_at"]
+    other=gateway_post(gateway,path,{"idempotency_key":"another"})
+    assert other.status_code==409
+    assert gateway_post(gateway,"/charges/"+str(uuid4())+"/reversal",{"idempotency_key":"x"}).json()["status"]=="NO_CHARGE"
+    assert gateway.post(path,content=b'{"idempotency_key":"k"}',headers={"Content-Type":"application/json"}).status_code==401
+
+
+def test_gateway_persists_callback_and_retries_until_backend_acknowledges(client,db_session):
+    import httpx
+    from sqlalchemy import select
+    from app.gateway import deliver_due_callbacks
+    from app.models import GatewayCharge
+    gateway=gateway_client()
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    gateway_post(gateway,"/charges",charge_request(payment_id,order))
+    orphan=gateway_post(gateway,"/charges",charge_request(str(uuid4()),order)).json()
+    def unreachable(request):
+        raise httpx.ConnectError("backend down",request=request)
+    with httpx.Client(transport=httpx.MockTransport(unreachable)) as down:
+        assert deliver_due_callbacks(client=down)==0
+    charges={row.payment_key:row for row in db_session.scalars(select(GatewayCharge))}
+    assert all(row.callback_delivered_at is None and row.callback_attempts==1 and row.lease_until is None for row in charges.values())
+    assert all(row.next_callback_at>datetime.now(timezone.utc) for row in charges.values())
+    assert deliver_due_callbacks(client=client)==0  # Backoff still pending.
+    db_session.execute(__import__("sqlalchemy").update(GatewayCharge).values(next_callback_at=datetime.now(timezone.utc)-timedelta(seconds=1)));db_session.commit()
+    assert deliver_due_callbacks(client=client)==1
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["status"]=="PAID"
+    db_session.expire_all()
+    delivered=db_session.scalar(select(GatewayCharge).where(GatewayCharge.payment_key==payment_id))
+    assert delivered.callback_delivered_at is not None and delivered.callback_attempts==2
+    rejected=db_session.scalar(select(GatewayCharge).where(GatewayCharge.id==UUID(orphan["id"])))
+    assert rejected.callback_delivered_at is None and rejected.callback_attempts==2  # 404 from backend is not an acknowledgement.
+    assert deliver_due_callbacks(client=client)==0
+
+
+def test_gateway_lifespan_runs_delivery_loop_and_records_failed_attempts(client,db_session,monkeypatch):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.config import get_settings
+    from app.gateway import app as gateway_app
+    from app.models import GatewayCharge
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    monkeypatch.setenv("CALLBACK_URL","http://127.0.0.1:9/api/v1/payments/callback")
+    monkeypatch.setenv("GATEWAY_POLL_SECONDS","0.2")
+    get_settings.cache_clear()
+    try:
+        with TestClient(gateway_app) as running:
+            assert gateway_post(running,"/charges",charge_request(payment_id,order)).status_code==201
+            deadline=time.monotonic()+10
+            attempts=0
+            while attempts==0 and time.monotonic()<deadline:
+                time.sleep(0.1)
+                attempts=db_session.scalar(select(GatewayCharge.callback_attempts).where(GatewayCharge.payment_key==payment_id))
+                db_session.rollback()
+        assert attempts>=1
+    finally:
+        get_settings.cache_clear()
+    db_session.expire_all()
+    charge=db_session.scalar(select(GatewayCharge).where(GatewayCharge.payment_key==payment_id))
+    assert charge.callback_delivered_at is None and charge.lease_until is None and charge.next_callback_at>datetime.now(timezone.utc)
