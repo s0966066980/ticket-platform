@@ -1,0 +1,6 @@
+# Browser end-to-end suite dependencies (kept out of backend/pyproject.toml).
+# Install: UV_CACHE_DIR=.runtime/uv-cache uv pip install --python .venv/bin/python -r e2e/requirements.txt
+#          .venv/bin/python -m playwright install chromium
+pytest>=8.3
+pytest-playwright>=0.7
+openpyxl>=3.1

@@ -9,3 +9,6 @@ __pycache__/
 .coverage
 .worktrees/
 .env.load
+
+# Browser e2e failure evidence (screenshots and Playwright traces)
+e2e/artifacts/

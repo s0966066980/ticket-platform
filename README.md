@@ -92,6 +92,16 @@ cd backend
 
 前端於 `frontend/` 執行 `npm run dev`。CI（GitHub Actions）在 PostgreSQL 16 與 Redis 7 service container 上執行同一套測試並保留 JUnit 證據。
 
+瀏覽器端到端測試（`e2e/`，pytest + Playwright，Chromium headless）直接操作 compose 啟動的完整系統（`docker compose up -d --build`）：以購票會員建立活動、匯入 `sample_data/seats.csv`、發布，在第二個瀏覽器情境以檢視者驗證座位即時推送（鎖定／售出／釋放）、模擬付款、下載 Excel 報表、Admin 監控與 request_id 追蹤，以及 `invalid_seats.csv` 的錯誤報告。每個測試使用全新的瀏覽器情境且不重試，失敗時在 `e2e/artifacts/` 留下截圖與 Playwright trace（`playwright show-trace`）。依賴獨立於後端：
+
+```bash
+UV_CACHE_DIR=.runtime/uv-cache uv pip install --python .venv/bin/python -r e2e/requirements.txt
+.venv/bin/python -m playwright install chromium
+E2E_BASE_URL=http://localhost:8080 ./scripts/run_e2e.sh      # 先等待 /health，再執行 .venv/bin/python -m pytest e2e -q
+```
+
+CI 的第三個 job `e2e` 在前兩個 job 通過後以同一份 compose 檔啟動整套服務執行此套件，並一律上傳 `e2e/artifacts/` 與 `docker compose logs`。
+
 ## 壓測
 
 腳本與執行方式見 [loadtests/README.md](loadtests/README.md)；實際結果、機器規格與瓶頸分析見 [LOADTEST.md](LOADTEST.md)。壓測使用獨立的 compose 專案（`docker-compose.load.yml` 覆蓋層，對 localhost 發布 PostgreSQL 以便產生 fixture 與一致性稽核）：
@@ -110,7 +120,7 @@ docker compose -p ticket-load --env-file .env.load -f docker-compose.yml -f dock
 - **慢速 WebSocket 客戶端**的策略是斷線重同步；半開連線在前端 15 秒看門狗觸發前畫面可能停留舊狀態（DESIGN Q4.3）。
 - **每秒指標保留每桶的原始延遲樣本**以精確合併百分位，資料量隨流量線性成長；worker 每小時依 `TELEMETRY_RETENTION_DAYS`（預設 7 天）清理日誌與指標，告警歷史不清。
 - **匯入錯誤報告**對檔案內重複列的所有出現都標記錯誤（而非只標第二次出現），比需求更嚴格。
-- **瀏覽器自動化 E2E** 未納入 CI；前端以 Vitest 行為測試與 compose 上的手動／腳本煙霧測試驗證。
+- **瀏覽器自動化 E2E**（`e2e/`）只涵蓋單一使用者的主要購票路徑與 Admin 後台；多人同時搶同一座位的衝突行為由後端併發測試與壓測驗證，不在瀏覽器套件內。
 - Redis 持久化失敗或磁碟滿時遙測會記錄遺失數並標示資料不完整，不會阻擋業務請求；這是刻意的取捨。
 
 開發過程採整合分支與獨立票單 worktree，交付時以 merge commit 併入 `main` 並刪除其餘分支；完整 commit 歷史保留在 `main`，交付倉庫為私有 `s0966066980/ticket-platform`。
