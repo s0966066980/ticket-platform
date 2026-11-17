@@ -30,3 +30,5 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 - Ticket13 CI source integrated; three gate checks, YAML parse and compile/diff PASS. Remote backend/frontend result must be read from GitHub run status. [Ticket](issues/13-ci.md).
 
 14 observability depends04 and is ready;09 realtime/worker now depends06,07,14. Shared pipeline separated from seat mutation dependencies.
+
+- Ticket06 booking source integrated; compile/diff PASS, new PostgreSQL concurrency tests await next actual CI (prior baseline pass is separate). Unlocks08 payments. [Ticket](issues/06-booking.md).

@@ -1,6 +1,6 @@
 # 06: Atomic reservations, quota, cancellation and idempotency
 
-Status: claimed
+Status: resolved
 Triage: ready-for-agent
 Blocked by: 05
 
@@ -25,3 +25,5 @@ Shared interfaces: app.booking.lock_quota(session,user_id,event_id), lock_order_
 app.idempotency exports Claim, OperationResult(status,body,headers), prepare_claim, claim_key, lock_claim, complete_key, reject_key and release_key. prepare_claim must be called before writes/locks. Authorized shared fixes: AppError now accepts keyword-only headers and preserves Retry-After; current_principal releases its read-only transaction after copying the immutable Principal, preventing saturated pools from retaining one connection while requesting another for claims/snapshots.
 
 Compilation and whitespace checks pass. HTTP/PG tests are supplied for all main paths and races, including single-connection pool, but this branch's actual pytest execution was blocked by PyPI DNS. Integration baseline CI has run separately; new ticket06 tests need its next CI run before claiming runtime validation. No schema changes.
+
+Merger evidence: normal history-preserving ticket06 merge; integration compileall and diff checks PASS. Shared auth read-transaction release and optional AppError headers are included and retain existing interfaces. Previous baseline CI run43986642559 passed before ticket06; it is NOT evidence for these new booking/concurrency tests. Source implementation closes now, while next actual GitHub CI must validate ticket06 runtime behavior.
