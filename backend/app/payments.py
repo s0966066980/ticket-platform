@@ -1,4 +1,25 @@
-"""Durable mock payment protocol, settlement and retryable compensation."""
+"""Durable mock payment protocol, settlement and retryable compensation.
+
+Protocol: every request between backend and gateway carries X-Gateway-Timestamp
+and X-Gateway-Signature = HMAC-SHA256(secret, timestamp\\nMETHOD\\npath\\nbody)
+over the raw body; deliveries older than 300 seconds are rejected.
+
+Worker entry points (stable for the worker process, ticket 09):
+
+* ``process_payment_jobs(limit=100, client=None) -> int`` claims due
+  ``payment_requested`` / ``payment_reversal_requested`` outbox rows with
+  SKIP LOCKED leases, calls the gateway (POST /charges, POST
+  /charges/{id}/reversal) and completes each row under its generation;
+  failures back off exponentially (max 60 s). Returns rows completed.
+* ``reconcile_payments(limit=100, client=None) -> int`` queries the gateway
+  (GET /charges/by-key/{payment_id}) for PENDING payments whose
+  ``next_retry_at`` is due and replays a settled callback through
+  ``process_callback`` when it was lost. Returns payments reconciled.
+
+Both open their own sessions, hold no database lock across HTTP calls, and
+are safe to run concurrently from several workers. ``client`` is an optional
+httpx.Client (tests pass one bound to the gateway ASGI app).
+"""
 from datetime import timedelta
 from hashlib import sha256
 import hmac
@@ -251,8 +272,9 @@ def _finish_job(identifier, generation, kind, payload, response, request_id):
         else:
             if response.get('status') not in {'REVERSED', 'NO_CHARGE'}:
                 raise ValueError('Provider did not confirm reversal')
-            payment.status = 'REVERSED'
-            payment.reversed_at = now
+            if payment.status == 'REVERSAL_PENDING':  # A replayed job never rewrites a finished reversal.
+                payment.status = 'REVERSED'
+                payment.reversed_at = now
             payment.reversal_attempts += 1
             payment.next_retry_at = None
             payment.last_error = None
@@ -324,9 +346,7 @@ def reconcile_payments(limit: int = 100, client: httpx.Client | None = None) -> 
         except (httpx.HTTPError, AppError, ValueError) as exc:
             LOG.warning('Payment reconciliation retry: %s', type(exc).__name__)
         finally:
-            with new_session() as session:
-                order, payment = _context(session, payment_id)
-                if payment.status == 'PENDING':
-                    payment.next_retry_at = db_now(session) + timedelta(seconds=5)
-                    session.commit()
+            with new_session() as session:  # Still unresolved: query again after the poll interval.
+                session.execute(update(Payment).where(Payment.id == payment_id, Payment.status == 'PENDING').values(next_retry_at=db_now(session) + timedelta(seconds=5)))
+                session.commit()
     return reconciled

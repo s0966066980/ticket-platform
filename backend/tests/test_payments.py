@@ -463,3 +463,152 @@ def test_gateway_lifespan_runs_delivery_loop_and_records_failed_attempts(client,
     db_session.expire_all()
     charge=db_session.scalar(select(GatewayCharge).where(GatewayCharge.payment_key==payment_id))
     assert charge.callback_delivered_at is None and charge.lease_until is None and charge.next_callback_at>datetime.now(timezone.utc)
+
+
+def payment_jobs(db_session,kind=None):
+    from sqlalchemy import select
+    from app.models import OutboxEvent
+    statement=select(OutboxEvent).where(OutboxEvent.kind.in_(["payment_requested","payment_reversal_requested"])).order_by(OutboxEvent.created_at)
+    if kind:
+        statement=statement.where(OutboxEvent.kind==kind)
+    db_session.expire_all()
+    return db_session.scalars(statement).all()
+
+
+def test_worker_charges_through_gateway_and_gateway_settles_order(client,db_session):
+    from app.gateway import deliver_due_callbacks
+    from app.models import Payment
+    from app.payments import process_payment_jobs
+    gateway=gateway_client()
+    headers,event,order=setup_order(client,db_session,count=2)
+    payment_id=pay(client,headers,order).json()["id"]
+    job,=payment_jobs(db_session)
+    assert job.kind=="payment_requested" and job.published_at is None and job.payload["outcome"]=="success"
+    assert process_payment_jobs(client=gateway)==1
+    job,=payment_jobs(db_session)
+    assert job.published_at is not None and job.generation==1 and job.lease_until is None
+    charge=gateway_get(gateway,"/charges/by-key/"+payment_id).json()
+    db_session.expire_all()
+    payment=db_session.get(Payment,UUID(payment_id))
+    assert payment.provider_charge_id==charge["id"] and payment.status=="PENDING"
+    assert charge["order_reference"]==order["id"] and charge["amount_twd"]==order["total_twd"]==210
+    assert process_payment_jobs(client=gateway)==0
+    assert deliver_due_callbacks(client=client)==1
+    paid=client.get("/api/v1/orders/"+order["id"],headers=headers).json()
+    assert paid["status"]=="PAID" and paid["payments"]==[{"id":payment_id,"status":"SUCCEEDED"}]
+    assert seat_states(client,headers,event)==["SOLD","SOLD"]
+    assert gateway_get(gateway,"/charges/by-key/"+payment_id).json()["callback_delivered_at"] is not None
+
+
+def test_worker_reverses_late_payment_idempotently_through_gateway(client,db_session):
+    from app.gateway import deliver_due_callbacks
+    from app.models import Payment
+    from app.payments import process_payment_jobs
+    gateway=gateway_client()
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    assert process_payment_jobs(client=gateway)==1
+    assert client.post("/api/v1/orders/"+order["id"]+"/cancel",headers=headers).json()["status"]=="CANCELED"
+    assert deliver_due_callbacks(client=client)==1
+    db_session.expire_all()
+    payment=db_session.get(Payment,UUID(payment_id))
+    assert payment.status=="REVERSAL_PENDING" and payment.reversal_key=="reverse:"+payment.provider_charge_id
+    reversal,=payment_jobs(db_session,"payment_reversal_requested")
+    assert reversal.published_at is None
+    assert process_payment_jobs(client=gateway)==1
+    db_session.expire_all()
+    payment=db_session.get(Payment,UUID(payment_id))
+    assert payment.status=="REVERSED" and payment.reversed_at is not None and payment.reversal_attempts==1
+    charge=gateway_get(gateway,"/charges/by-key/"+payment_id).json()
+    assert charge["reversed_at"] is not None
+    # The provider already reversed but the backend lost the acknowledgement: replaying the job is harmless.
+    from sqlalchemy import update
+    from app.models import OutboxEvent
+    db_session.execute(update(OutboxEvent).where(OutboxEvent.id==reversal.id).values(published_at=None,lease_until=None));db_session.commit()
+    assert process_payment_jobs(client=gateway)==1
+    assert gateway_get(gateway,"/charges/by-key/"+payment_id).json()["reversed_at"]==charge["reversed_at"]
+    db_session.expire_all()
+    assert db_session.get(Payment,UUID(payment_id)).status=="REVERSED"
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["status"]=="CANCELED"
+
+
+def test_two_workers_do_not_double_execute_payment_jobs(client,db_session):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from app.payments import process_payment_jobs
+    gateway=gateway_client()
+    headers,event,order=setup_order(client,db_session)
+    pay(client,headers,order)
+    barrier=Barrier(2)
+    def worker(_):
+        barrier.wait()
+        return process_payment_jobs(client=gateway)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        completed=list(pool.map(worker,range(2)))
+    assert sorted(completed)==[0,1]
+    job,=payment_jobs(db_session)
+    assert job.published_at is not None and job.generation==1
+
+
+def test_gateway_failure_leaves_job_retryable_with_backoff(client,db_session):
+    import httpx
+    from app.models import Payment
+    from app.payments import process_payment_jobs
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    def unreachable(request):
+        raise httpx.ConnectError("gateway down",request=request)
+    with httpx.Client(transport=httpx.MockTransport(unreachable)) as down:
+        assert process_payment_jobs(client=down)==0
+    job,=payment_jobs(db_session)
+    assert job.published_at is None and job.attempts==1 and job.lease_until is None and job.last_error=="ConnectError"
+    assert job.available_at>datetime.now(timezone.utc)
+    db_session.expire_all()
+    assert db_session.get(Payment,UUID(payment_id)).provider_charge_id is None
+    assert process_payment_jobs(client=gateway_client())==0  # Backoff still pending.
+    from sqlalchemy import update
+    from app.models import OutboxEvent
+    db_session.execute(update(OutboxEvent).where(OutboxEvent.id==job.id).values(available_at=datetime.now(timezone.utc)-timedelta(seconds=1)));db_session.commit()
+    assert process_payment_jobs(client=gateway_client())==1
+
+
+def test_reconciliation_recovers_a_lost_callback(client,db_session):
+    from sqlalchemy import update
+    from app.gateway import deliver_due_callbacks
+    from app.models import Payment
+    from app.payments import process_payment_jobs,reconcile_payments
+    gateway=gateway_client()
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order).json()["id"]
+    assert reconcile_payments(client=gateway)==0  # Not due yet; nothing charged either.
+    assert process_payment_jobs(client=gateway)==1
+    db_session.execute(update(Payment).where(Payment.id==UUID(payment_id)).values(next_retry_at=datetime.now(timezone.utc)-timedelta(seconds=1)));db_session.commit()
+    # The gateway settled the charge but its callback never arrived.
+    assert reconcile_payments(client=gateway)==1
+    paid=client.get("/api/v1/orders/"+order["id"],headers=headers).json()
+    assert paid["status"]=="PAID" and paid["payments"]==[{"id":payment_id,"status":"SUCCEEDED"}]
+    assert seat_states(client,headers,event)==["SOLD"]
+    db_session.expire_all()
+    assert db_session.get(Payment,UUID(payment_id)).next_retry_at is None
+    # The delayed callback finally arrives and replays the stored result.
+    assert deliver_due_callbacks(client=client)==1
+    assert client.get("/api/v1/events/"+event["id"]+"/version",headers=headers).json()["version"]==2
+    assert reconcile_payments(client=gateway)==0
+
+
+def test_reconciliation_waits_for_unsettled_and_uncharged_payments(client,db_session):
+    from sqlalchemy import update
+    from app.models import Payment
+    from app.payments import process_payment_jobs,reconcile_payments
+    gateway=gateway_client()
+    headers,event,order=setup_order(client,db_session)
+    payment_id=pay(client,headers,order,delay=600).json()["id"]
+    db_session.execute(update(Payment).where(Payment.id==UUID(payment_id)).values(next_retry_at=datetime.now(timezone.utc)-timedelta(seconds=1)));db_session.commit()
+    assert reconcile_payments(client=gateway)==0  # Gateway answers 404: the charge job has not run yet.
+    db_session.expire_all()
+    payment=db_session.get(Payment,UUID(payment_id))
+    assert payment.status=="PENDING" and payment.next_retry_at>datetime.now(timezone.utc)
+    assert process_payment_jobs(client=gateway)==1
+    db_session.execute(update(Payment).where(Payment.id==UUID(payment_id)).values(next_retry_at=datetime.now(timezone.utc)-timedelta(seconds=1)));db_session.commit()
+    assert reconcile_payments(client=gateway)==0  # Charged but not settled for another 600 seconds.
+    assert client.get("/api/v1/orders/"+order["id"],headers=headers).json()["payments"]==[{"id":payment_id,"status":"PENDING"}]
