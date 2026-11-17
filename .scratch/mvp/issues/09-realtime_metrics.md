@@ -2,7 +2,7 @@
 
 Status: open
 Triage: ready-for-agent
-Blocked by: 06, 07
+Blocked by: 06, 07, 14
 
 ## Spec
 
@@ -17,3 +17,5 @@ Use tdd red-green vertical slices at approved public seams. You are not alone in
 ## Answer
 
 Pending.
+
+Observability source moved to independent ticket14;09 integrates its worker collector/middleware API and owns any needed frontend resync_required handling.
