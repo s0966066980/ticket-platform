@@ -1,0 +1,7 @@
+locust>=2.37,<3
+websockets>=15,<18
+httpx>=0.28,<1
+psycopg[binary]>=3.2,<4
+SQLAlchemy>=2.0,<3
+argon2-cffi>=23.1
+openpyxl>=3.1,<4
