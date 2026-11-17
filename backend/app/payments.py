@@ -20,6 +20,7 @@ Both open their own sessions, hold no database lock across HTTP calls, and
 are safe to run concurrently from several workers. ``client`` is an optional
 httpx.Client (tests pass one bound to the gateway ASGI app).
 """
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from hashlib import sha256
 import hmac
@@ -305,23 +306,44 @@ def _fail_job(identifier, generation, payload, request_id, error):
         session.commit()
 
 
-def process_payment_jobs(limit: int = 100, client: httpx.Client | None = None) -> int:
-    """Run durable charge/reversal outbox work; network calls hold no DB locks."""
+def _run_payment_job(client: httpx.Client, job) -> bool:
+    identifier, generation, kind, payload, request_id = job
+    try:
+        if kind == 'payment_requested':
+            response = _gateway_request(client, 'POST', '/charges', payload, request_id)
+        else:
+            path = '/charges/' + quote(payload['provider_charge_id'], safe='') + '/reversal'
+            response = _gateway_request(client, 'POST', path, {'idempotency_key': payload['idempotency_key']}, request_id)
+        return _finish_job(identifier, generation, kind, payload, response, request_id)
+    except Exception as exc:
+        LOG.warning('Payment job retry: %s', type(exc).__name__)
+        _fail_job(identifier, generation, payload, request_id, exc)
+        return False
+
+
+def process_payment_jobs(limit: int = 100, client: httpx.Client | None = None, *, max_batches: int = 20) -> int:
+    """Run durable charge/reversal outbox work; network calls hold no DB locks.
+
+    Jobs of one batch run on up to PAYMENT_JOB_CONCURRENCY threads, and full
+    batches are drained back to back (at most ``max_batches`` per call) so a
+    burst of payments is charged within seconds instead of 100 per poll.
+    """
     if client is None:
-        with httpx.Client(timeout=10) as owned_client:
-            return process_payment_jobs(limit, owned_client)
+        with httpx.Client(timeout=10, limits=httpx.Limits(max_connections=64, max_keepalive_connections=32)) as owned_client:
+            return process_payment_jobs(limit, owned_client, max_batches=max_batches)
+    workers = max(1, get_settings().payment_job_concurrency)
     completed = 0
-    for identifier, generation, kind, payload, request_id in _claim_jobs(limit):
-        try:
-            if kind == 'payment_requested':
-                response = _gateway_request(client, 'POST', '/charges', payload, request_id)
-            else:
-                path = '/charges/' + quote(payload['provider_charge_id'], safe='') + '/reversal'
-                response = _gateway_request(client, 'POST', path, {'idempotency_key': payload['idempotency_key']}, request_id)
-            completed += int(_finish_job(identifier, generation, kind, payload, response, request_id))
-        except Exception as exc:
-            LOG.warning('Payment job retry: %s', type(exc).__name__)
-            _fail_job(identifier, generation, payload, request_id, exc)
+    for _ in range(max_batches):
+        jobs = _claim_jobs(limit)
+        if not jobs:
+            break
+        if workers == 1 or len(jobs) == 1:
+            completed += sum(_run_payment_job(client, job) for job in jobs)
+        else:
+            with ThreadPoolExecutor(max_workers=min(workers, len(jobs)), thread_name_prefix='payment-job') as pool:
+                completed += sum(pool.map(lambda job: _run_payment_job(client, job), jobs))
+        if len(jobs) < limit:
+            break
     return completed
 
 

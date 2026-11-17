@@ -15,6 +15,7 @@ lease_until, callback_delivered_at) and delivered to CALLBACK_URL by the
 in-process loop ``deliver_due_callbacks`` every GATEWAY_POLL_SECONDS with
 exponential backoff; only a 2xx answer marks it delivered.
 """
+from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -143,15 +144,34 @@ def _reverse_charge(request: Request, charge_id: UUID, raw: bytes):
         return body
 
 
-def deliver_due_callbacks(client: httpx.Client | None = None, limit: int = 100) -> int:
-    """One pass of the durable callback loop; returns how many were acknowledged.
+def _deliver_one(client: httpx.Client, url: str, path: str, item) -> bool:
+    identifier, generation, payload, request_id = item
+    body = canonical_bytes(payload)
+    with new_session() as session:
+        headers = signed_headers(session, 'POST', path, body, request_id)
+    try:
+        response = client.post(url, content=body, headers=headers)
+        error = None if 200 <= response.status_code < 300 else f'HTTP_{response.status_code}'
+    except httpx.HTTPError as exc:
+        error = type(exc).__name__
+    with new_session() as session:
+        charge = session.scalar(select(GatewayCharge).where(GatewayCharge.id == identifier).with_for_update().execution_options(populate_existing=True))
+        if charge is None or charge.lease_generation != generation or charge.callback_delivered_at is not None:
+            return False
+        now = db_now(session)
+        charge.callback_attempts += 1
+        charge.lease_until = None
+        if error is None:
+            charge.callback_delivered_at = now
+        else:
+            charge.next_callback_at = now + timedelta(seconds=min(2 ** min(charge.callback_attempts, 6), 60))
+            LOG.warning('Callback retry for charge %s after %s (attempt %s)', identifier, error, charge.callback_attempts)
+        session.commit()
+        return error is None
 
-    Due rows are leased with a generation so a crashed or duplicate deliverer can
-    neither double-mark nor lose a callback. The HTTP call holds no DB lock.
-    """
-    if client is None:
-        with httpx.Client(timeout=10) as owned:
-            return deliver_due_callbacks(owned, limit)
+
+def _delivery_pass(client: httpx.Client, limit: int) -> tuple[int, int]:
+    """Lease up to ``limit`` due callbacks and deliver them concurrently; returns (claimed, delivered)."""
     settings = get_settings()
     path = urlsplit(settings.callback_url).path
     with new_session() as session:
@@ -167,41 +187,41 @@ def deliver_due_callbacks(client: httpx.Client | None = None, limit: int = 100) 
             charge.lease_until = now + timedelta(seconds=LEASE_SECONDS)
             claimed.append((charge.id, charge.lease_generation, dict(charge.callback_payload), charge.request_id))
         session.commit()
-    delivered = 0
-    for identifier, generation, payload, request_id in claimed:
-        body = canonical_bytes(payload)
-        with new_session() as session:
-            headers = signed_headers(session, 'POST', path, body, request_id)
-        try:
-            response = client.post(settings.callback_url, content=body, headers=headers)
-            error = None if 200 <= response.status_code < 300 else f'HTTP_{response.status_code}'
-        except httpx.HTTPError as exc:
-            error = type(exc).__name__
-        with new_session() as session:
-            charge = session.scalar(select(GatewayCharge).where(GatewayCharge.id == identifier).with_for_update().execution_options(populate_existing=True))
-            if charge is None or charge.lease_generation != generation or charge.callback_delivered_at is not None:
-                continue
-            now = db_now(session)
-            charge.callback_attempts += 1
-            charge.lease_until = None
-            if error is None:
-                charge.callback_delivered_at = now
-                delivered += 1
-            else:
-                charge.next_callback_at = now + timedelta(seconds=min(2 ** min(charge.callback_attempts, 6), 60))
-                LOG.warning('Callback retry for charge %s after %s (attempt %s)', identifier, error, charge.callback_attempts)
-            session.commit()
-    return delivered
+    workers = max(1, min(settings.gateway_delivery_concurrency, len(claimed)))
+    if workers == 1:
+        results = [_deliver_one(client, settings.callback_url, path, item) for item in claimed]
+    else:
+        # A sequential loop capped delivery near 50 callbacks/s and let holds
+        # expire under load; each callback is independent and leased by generation.
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='callback') as pool:
+            results = list(pool.map(lambda item: _deliver_one(client, settings.callback_url, path, item), claimed))
+    return len(claimed), sum(results)
 
 
-async def _callback_loop(stop: asyncio.Event) -> None:
+def deliver_due_callbacks(client: httpx.Client | None = None, limit: int = 100) -> int:
+    """One pass of the durable callback loop; returns how many were acknowledged.
+
+    Due rows are leased with a generation so a crashed or duplicate deliverer can
+    neither double-mark nor lose a callback. The HTTP calls hold no DB lock and
+    run on up to GATEWAY_DELIVERY_CONCURRENCY threads.
+    """
+    if client is None:
+        with httpx.Client(timeout=10) as owned:
+            return deliver_due_callbacks(owned, limit)
+    return _delivery_pass(client, limit)[1]
+
+
+async def _callback_loop(stop: asyncio.Event, limit: int = 100) -> None:
     poll = max(get_settings().gateway_poll_seconds, 0.1)
-    with httpx.Client(timeout=10) as client:
+    with httpx.Client(timeout=10, limits=httpx.Limits(max_connections=64, max_keepalive_connections=32)) as client:
         while not stop.is_set():
+            claimed = 0
             try:
-                await asyncio.to_thread(deliver_due_callbacks, client)
+                claimed, _ = await asyncio.to_thread(_delivery_pass, client, limit)
             except Exception:  # The loop must survive database outages.
                 LOG.exception('Callback delivery pass failed')
+            if claimed >= limit:
+                continue  # A full batch means a backlog: drain it instead of waiting a poll interval.
             try:
                 await asyncio.wait_for(stop.wait(), timeout=poll)
             except TimeoutError:

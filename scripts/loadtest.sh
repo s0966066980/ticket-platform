@@ -84,6 +84,34 @@ audit() {  # audit <event-id> <output>
   "$PY" "$ROOT/scripts/check_consistency.py" --event-id "$1" --require-settled --output "$2" > /dev/null
 }
 
+settle() {  # settle <event-id> <output>: wait for payment settlement, record outcome
+  "$PY" - "$1" "$2" <<'PY'
+import json, os, sys, time
+import psycopg
+event, output = sys.argv[1], sys.argv[2]
+url = os.environ['LOAD_DATABASE_URL'].replace('postgresql+psycopg://', 'postgresql://', 1)
+started = time.monotonic()
+with psycopg.connect(url, autocommit=True) as conn:
+    while True:
+        pending = conn.execute("SELECT count(*) FROM payments p JOIN orders o ON o.id = p.order_id WHERE o.event_id = %s AND p.status = 'PENDING'", (event,)).fetchone()[0]
+        if pending == 0 or time.monotonic() - started > 420:
+            break
+        time.sleep(2)
+    rows = conn.execute("""SELECT o.status, p.status, count(*) FROM payments p JOIN orders o ON o.id = p.order_id
+                           WHERE o.event_id = %s GROUP BY 1, 2""", (event,)).fetchall()
+    first, last_paid = conn.execute("""SELECT min(p.created_at), max(p.succeeded_at) FROM payments p JOIN orders o ON o.id = p.order_id
+                                       WHERE o.event_id = %s""", (event,)).fetchone()
+    sold = conn.execute("SELECT count(*) FROM seats WHERE event_id = %s AND status = 'SOLD'", (event,)).fetchone()[0]
+outcome = {f'{order}/{payment}': count for order, payment, count in rows}
+late = sum(count for order, payment, count in rows if order in ('EXPIRED', 'CANCELED') and payment in ('SUCCEEDED', 'REVERSAL_PENDING', 'REVERSED'))
+result = {'event_id': event, 'still_pending': pending, 'seconds_waited_after_run': round(time.monotonic() - started, 1),
+          'first_payment_at': first.isoformat() if first else None, 'last_success_at': last_paid.isoformat() if last_paid else None,
+          'sold_seats': sold, 'outcomes': outcome, 'late_payments_reversed': late, 'passed': pending == 0 and late == 0}
+json.dump(result, open(output, 'w'), indent=2)
+sys.exit(0 if result['passed'] else 1)
+PY
+}
+
 sample_resources() {  # sample_resources <csv> <stop-file>: docker stats every ~2 s
   echo 'epoch,container,cpu_pct,mem_usage' > "$1"
   while [[ ! -f "$2" ]]; do
@@ -108,9 +136,13 @@ scenario_a() {
     "$PY" -m locust -f "$ROOT/loadtests/locustfile.py" --headless --host "$BASE_URL" \
       --csv "$RES/booking" --csv-full-history --html "$RES/booking.html" --stop-timeout 20 \
       > "$RES/booking.log" 2>&1 || status=$?
-  sleep 20  # let the worker settle expiries, payments and Outbox before auditing
+  # A 202 only means "payment accepted": wait until every payment of this activity
+  # has settled, then check none arrived after its hold expired.
+  settle "$(event_of "$FIX/booking.json")" "$RES/booking-settlement.json" || status=1
+  sleep 5  # last Outbox rows
   audit "$(event_of "$FIX/booking.json")" "$RES/booking-consistency.json" || status=1
   summary "{'ready_users': d['ready_users'], 'steady_seconds': round(d['steady_seconds'],1), **d['steady_statistics'], 'business': d['business_http_counts']}" "$RES/booking.json"
+  summary "d" "$RES/booking-settlement.json"
   summary "{'consistency_passed': d['passed'], 'violations': sum(d['violations'].values())}" "$RES/booking-consistency.json"
   [[ $(summary "d['required_scenario_completed']" "$RES/booking.json") == True ]] || status=1
   return $status

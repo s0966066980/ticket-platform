@@ -5,7 +5,7 @@ These are executable harnesses, **not measured results**; measured numbers live 
 ## Quick start
 
 ```bash
-PYTHON_BIN=python3.13 ./scripts/setup.sh   # once: project .venv
+PYTHON_BIN=python3.13 ./scripts/setup.sh   # once: project .venv (PYTHON_BIN = a Python 3.13 interpreter)
 ./scripts/loadtest.sh all                  # load stack + scenarios A, B, import, Excel
 ./scripts/loadtest.sh down                 # remove the load stack and its data
 ```

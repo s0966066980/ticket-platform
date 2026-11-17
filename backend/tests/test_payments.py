@@ -500,6 +500,25 @@ def test_worker_charges_through_gateway_and_gateway_settles_order(client,db_sess
     assert gateway_get(gateway,"/charges/by-key/"+payment_id).json()["callback_delivered_at"] is not None
 
 
+def test_payment_backlog_is_drained_in_one_worker_call_and_one_gateway_pass(client,db_session):
+    """Regression: a load test charged 10,000 payments at ~100 per poll and the gateway
+    delivered ~100 callbacks per 5 s, so 5,735 orders expired before their payment
+    settled. Full batches must be drained back to back and delivered concurrently."""
+    from app.gateway import _delivery_pass
+    from app.payments import process_payment_jobs
+    gateway=gateway_client()
+    headers,event,first=setup_order(client,db_session,count=1)
+    orders=[(headers,first)]+[setup_order_for(client,db_session,f"buyer{i}@example.test",event)[0::2] for i in range(4)]
+    for buyer_headers,order in orders:
+        assert pay(client,buyer_headers,order).status_code==202
+    assert process_payment_jobs(limit=2,client=gateway)==5, "three full-or-partial batches drained in one call"
+    assert all(job.published_at is not None for job in payment_jobs(db_session))
+    claimed,delivered=_delivery_pass(client,limit=5)
+    assert (claimed,delivered)==(5,5), "one pass delivers the whole batch concurrently"
+    for buyer_headers,order in orders:
+        assert client.get("/api/v1/orders/"+order["id"],headers=buyer_headers).json()["status"]=="PAID"
+
+
 def test_worker_reverses_late_payment_idempotently_through_gateway(client,db_session):
     from app.gateway import deliver_due_callbacks
     from app.models import Payment

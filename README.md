@@ -71,6 +71,8 @@ PYTHON_BIN=python3.13 ./scripts/setup.sh    # 第一次：建立 .venv 並安裝
 ./scripts/run_tests.sh                      # 之後每次：一行執行全部測試
 ```
 
+`PYTHON_BIN` 指向 Python 3.13 直譯器（與 CI、Docker 映像相同的版本）；PATH 上沒有 `python3.13` 時改用完整路徑，例如 uv 安裝的 `~/.local/share/uv/python/cpython-3.13.*/bin/python3`。省略時使用 `python3`，版本低於 3.13 會直接拒絕。
+
 `run_tests.sh` 依序執行：CLI 合約測試 → 建立拋棄式 PostgreSQL 16 cluster（從 55432 起找第一個空閒埠）→ 啟動拋棄式 Redis 7 容器 → migration 與全部後端測試（含併發、即時推送、worker）→ 前端測試與 production build。結束時自動停止資料庫並移除 Redis 容器；任何一項失敗，結束碼即非 0。不需要先啟動應用程式，也不會碰到展示或壓測堆疊。
 
 | 情況 | 指令 |

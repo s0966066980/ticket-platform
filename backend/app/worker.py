@@ -73,7 +73,11 @@ def _jobs() -> dict[str, list[Job]]:
     return {
         'orders': [
             Job('expire_due_orders', lambda: expire_due_orders(), poll),
-            Job('process_payment_jobs', lambda: _call_optional('app.payments', 'process_payment_jobs'), poll),
+        ],
+        # Payments get their own thread: charging and reconciliation make network
+        # calls and must not delay hold expiry, or be delayed by it.
+        'payments': [
+            Job('process_payment_jobs', lambda: _call_optional('app.payments', 'process_payment_jobs'), min(poll, 0.25)),
             Job('reconcile_payments', lambda: _call_optional('app.payments', 'reconcile_payments'), max(poll, settings.gateway_poll_seconds)),
         ],
         'imports': [

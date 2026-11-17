@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = 1.0
     outbox_poll_seconds: float = 0.25
     gateway_poll_seconds: float = 1.0
+    gateway_delivery_concurrency: int = 16
+    payment_job_concurrency: int = 16
     ws_version_check_seconds: float = 5.0
     ws_queue_size: int = 256
     metrics_window_seconds: int = 60
