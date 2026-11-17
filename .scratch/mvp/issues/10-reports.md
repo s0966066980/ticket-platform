@@ -2,7 +2,7 @@
 
 Status: open
 Triage: ready-for-agent
-Blocked by: 06
+Blocked by: 04
 
 ## Spec
 
@@ -17,3 +17,5 @@ Use tdd red-green vertical slices at approved public seams. You are not alone in
 ## Answer
 
 Pending.
+
+Dependency refinement: report implementation requires the approved schema and authentication/authorization, not Booking service code; it can start once ticket04 is integrated. Report verification still checks real order data at the public export seam.

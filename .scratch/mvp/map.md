@@ -1,6 +1,6 @@
 # MVP task graph
 
-01 foundation -> 04 auth -> 05 events -> 06 booking -> 08 payments / 10 reports
+01 foundation -> 04 auth -> 05 events -> 06 booking -> 08 payments
 05 events -> 07 imports
 06 booking + 07 imports -> 09 realtime_metrics
 02 frontend + 03 deployment + 07 + 08 + 09 + 10 -> 11 delivery
@@ -16,3 +16,6 @@ Initial frontier: 01, 02, 03. Closure requires merge and evidence.
 - Ticket 01 backend foundation integrated; compile/static model-migration columns PASS, runtime dependency/PG16 checks explicitly pending. [Ticket](issues/01-foundation.md). Unlocks ticket04 auth.
 
 - Ticket 02 UI source integrated; four behavior tests, TypeScript and production build passed in integration checkout. Visual/full-backend E2E remains pending. [Ticket](issues/02-frontend.md).
+
+- Ticket04 session/auth source integrated with compile/diff checks; HTTP/PG execution remains pending. [Ticket](issues/04-auth.md).
+- Frontier refinement: 04 auth -> 05 events and 10 reports. Reports depends on schema+auth rather than Booking implementation.
