@@ -197,7 +197,13 @@ export default function EventDetail({
     [error, setError] = useState<unknown>(),
     [success, setSuccess] = useState("");
   const version = useRef(-1),
-    buffer = useRef<{ version: number; changes?: Partial<Seat>[] }[]>([]),
+    buffer = useRef<
+      {
+        version: number;
+        changes?: Partial<Seat>[];
+        resync_required?: boolean;
+      }[]
+    >([]),
     loading = useRef(false),
     alive = useRef(true),
     socketRef = useRef<WebSocket | null>(null);
@@ -221,7 +227,7 @@ export default function EventDetail({
       let gap = false;
       for (const frame of pending) {
         if (frame.version <= version.current) continue;
-        if (frame.version !== version.current + 1) {
+        if (frame.version !== version.current + 1 || frame.resync_required) {
           gap = true;
           break;
         }
@@ -284,7 +290,9 @@ export default function EventDetail({
               return;
             }
             if (frame.version <= version.current) return;
-            if (frame.version !== version.current + 1) {
+            if (frame.version !== version.current + 1 || frame.resync_required) {
+              // A gap, or a bulk change (seat import) that carries no per-seat
+              // patches: the snapshot is the only correct recovery.
               setSynced(false);
               void snapshot();
               return;
