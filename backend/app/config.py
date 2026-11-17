@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     alert_error_rate: float = 0.05
     alert_p95_seconds: float = 1.0
     alert_outbox_lag_seconds: float = 10.0
+    alert_booking_rejection_rate: float = 0.8
+    alert_payment_failure_rate: float = 0.5
     alert_min_requests: int = 20
     alert_sustain_seconds: float = 15.0
     database_pool_size: int = 20

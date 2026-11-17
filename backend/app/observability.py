@@ -63,7 +63,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.database import db_now, new_session
-from app.models import AccessLog, Alert, OutboxEvent, ServiceLog, SystemMetric
+from app.models import AccessLog, Alert, OutboxEvent, ServiceLog, SystemMetric, Payment
 
 INSTANCE_ID = str(uuid4())
 PROTOCOL_VERSION = 1
@@ -80,6 +80,9 @@ GAUGE_STALE_SECONDS = 3               # heartbeat carry-forward before a source 
 RULE_ERROR_RATE = 'error_rate'
 RULE_P95_LATENCY = 'p95_latency'
 RULE_OUTBOX_LAG = 'outbox_lag'
+RULE_BOOKING_REJECTION = 'booking_rejection_rate'
+RULE_PAYMENT_FAILURE = 'payment_failure_rate'
+BOOKING_ROUTE = '/api/v1/events/{event_id}/bookings'
 GLOBAL_SCOPE = 'global'
 LOGGER = logging.getLogger('ticket.telemetry')
 _SECRET_KEY = re.compile(r'password|token|secret|authorization|cookie|signature|credential', re.I)
@@ -812,6 +815,18 @@ def _rule_conditions(session: Session, now: datetime) -> dict[str, tuple[bool, d
               'min_requests': settings.alert_min_requests, 'data_complete': metrics['data_complete']}
     oldest = session.scalar(select(func.min(OutboxEvent.created_at)).where(OutboxEvent.published_at.is_(None)))
     lag = round((now - oldest).total_seconds(), 3) if oldest is not None else None
+    # Business outcomes that look healthy at the HTTP layer: seat reservations
+    # answered 409 and mock-payment attempts settled as FAILED within the window.
+    window_start = now - timedelta(seconds=metrics['window_seconds'])
+    booking_total, booking_rejected = session.execute(select(
+        func.count(AccessLog.event_id), func.count(AccessLog.event_id).filter(AccessLog.status_code == 409),
+    ).where(AccessLog.route_template == BOOKING_ROUTE, AccessLog.method == 'POST',
+            AccessLog.observed_at > window_start, AccessLog.observed_at <= now)).one()
+    booking_rate = round(booking_rejected / booking_total, 4) if booking_total else None
+    payment_total, payment_failed = session.execute(select(
+        func.count(Payment.id), func.count(Payment.id).filter(Payment.status == 'FAILED'),
+    ).where(Payment.status.in_(['FAILED', 'SUCCEEDED']), Payment.updated_at > window_start, Payment.updated_at <= now)).one()
+    payment_rate = round(payment_failed / payment_total, 4) if payment_total else None
     return {
         RULE_ERROR_RATE: (
             enough and metrics['error_rate'] is not None and metrics['error_rate'] > settings.alert_error_rate,
@@ -825,6 +840,16 @@ def _rule_conditions(session: Session, now: datetime) -> dict[str, tuple[bool, d
             lag is not None and lag > settings.alert_outbox_lag_seconds,
             {'value_seconds': lag, 'threshold_seconds': settings.alert_outbox_lag_seconds,
              'oldest_unpublished_at': oldest.isoformat() if oldest else None},
+        ),
+        RULE_BOOKING_REJECTION: (
+            booking_total >= settings.alert_min_requests and booking_rate is not None and booking_rate > settings.alert_booking_rejection_rate,
+            {'window_seconds': metrics['window_seconds'], 'booking_requests': booking_total, 'rejected_409': booking_rejected,
+             'value': booking_rate, 'threshold': settings.alert_booking_rejection_rate, 'min_requests': settings.alert_min_requests},
+        ),
+        RULE_PAYMENT_FAILURE: (
+            payment_total >= settings.alert_min_requests and payment_rate is not None and payment_rate > settings.alert_payment_failure_rate,
+            {'window_seconds': metrics['window_seconds'], 'settled_attempts': payment_total, 'failed': payment_failed,
+             'value': payment_rate, 'threshold': settings.alert_payment_failure_rate, 'min_requests': settings.alert_min_requests},
         ),
     }
 

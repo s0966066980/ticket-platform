@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 import pytest
@@ -73,9 +73,9 @@ def run_cli(*arguments):
     return subprocess.run([sys.executable, '-m', 'app.observability', *arguments], cwd=BACKEND, env=os.environ.copy(), text=True, capture_output=True, check=False)
 
 
-def seed_access_logs(session, instance_id, observed_at, durations_ms, *, status=200, error_kind=None, business_outcome=None, clock_error_us=0):
+def seed_access_logs(session, instance_id, observed_at, durations_ms, *, status=200, error_kind=None, business_outcome=None, clock_error_us=0, method='GET', route='/api/v1/events'):
     rows = [AccessLog(
-        request_id=f'seed-{uuid4().hex[:12]}', instance_id=instance_id, method='GET', route_template='/api/v1/events',
+        request_id=f'seed-{uuid4().hex[:12]}', instance_id=instance_id, method=method, route_template=route,
         status_code=status, error_kind=error_kind, business_outcome=business_outcome, duration_us=int(duration * 1000),
         observed_at=observed_at, clock_error_us=clock_error_us,
     ) for duration in durations_ms]
@@ -440,3 +440,52 @@ def test_nginx_trace_rows_become_service_logs_with_durable_checkpoint(observed_c
     assert [item['service'] for item in body['items']] == ['nginx', 'api']
     assert body['items'][0]['context']['status'] == '200' and body['items'][0]['code'] == 'HTTP_PROXY_REQUEST'
     assert datetime.fromisoformat(body['items'][0]['observed_at']) == datetime.fromisoformat('2026-01-05T10:00:00+08:00')
+
+
+def test_booking_rejection_alert_fires_when_http_looks_healthy(observed_client, admin_token, db_session):
+    """Every answer is a well-formed 409: no 5xx, p95 fine, yet nobody can buy."""
+    from app.observability import BOOKING_ROUTE
+    t0 = second(db_now(db_session))
+    sustain = timedelta(seconds=get_settings().alert_sustain_seconds)
+    seed_access_logs(db_session, 'replica-a', t0 - timedelta(seconds=2), [20] * 19, status=409, business_outcome='SEAT_UNAVAILABLE', method='POST', route=BOOKING_ROUTE)
+    refresh_metrics(now=t0)
+    evaluate_alerts(now=t0)
+    assert [alert.rule_id for alert in open_alerts(db_session)] == [], '19 bookings is below the 20-request gate'
+    seed_access_logs(db_session, 'replica-b', t0 - timedelta(seconds=1), [20] * 2, status=201, method='POST', route=BOOKING_ROUTE)
+    seed_access_logs(db_session, 'replica-b', t0 - timedelta(seconds=1), [20] * 4, status=409, business_outcome='QUOTA_EXCEEDED', method='POST', route=BOOKING_ROUTE)
+    refresh_metrics(now=t0)
+    evaluate_alerts(now=t0)
+    fired = {alert['rule_id']: alert for alert in evaluate_alerts(now=t0 + sustain)}
+    assert fired['booking_rejection_rate']['status'] == 'FIRING'
+    assert fired['booking_rejection_rate']['details'] == {**fired['booking_rejection_rate']['details'], 'booking_requests': 25, 'rejected_409': 23, 'value': 0.92}
+    assert 'error_rate' not in fired and 'p95_latency' not in fired, 'the system-health rules stay quiet'
+    listed = observed_client.get('/api/v1/admin/alerts', headers=bearer(admin_token)).json()['items']
+    assert [(item['rule_id'], item['status']) for item in listed] == [('booking_rejection_rate', 'FIRING')]
+
+
+def test_payment_failure_alert_counts_settled_mock_payments(observed_client, admin_token, db_session):
+    from app.models import Order, Payment, User
+    t0 = second(db_now(db_session))
+    sustain = timedelta(seconds=get_settings().alert_sustain_seconds)
+    user = db_session.scalar(select(User).limit(1))
+    credentials = {'email': 'payer-alert@example.test', 'password': 'Payer-alert-123!'}
+    observed_client.post('/api/v1/auth/register', json=credentials)
+    buyer = db_session.scalar(select(User).where(User.email == credentials['email']))
+    from datetime import timezone as _tz
+    event = observed_client.post('/api/v1/events', headers=bearer(observed_client.post('/api/v1/auth/login', json=credentials).json()['token']), json={
+        'title': 'Alert show', 'description': '', 'category': 'music', 'venue': 'Taipei',
+        'sales_start': (t0 - timedelta(hours=1)).isoformat(), 'sales_end': (t0 + timedelta(days=1)).isoformat(),
+        'zones': [{'code': 'A', 'name': 'A', 'price_twd': 100}]}).json()
+    for index in range(24):
+        order = Order(event_id=UUID(event['id']), user_id=buyer.id, status='PENDING_PAYMENT', ticket_count=1, subtotal_twd=100, fee_twd=5, total_twd=105, expires_at=t0 + timedelta(minutes=5))
+        db_session.add(order)
+        db_session.flush()
+        db_session.add(Payment(order_id=order.id, status='FAILED' if index < 20 else 'SUCCEEDED', amount_twd=105, request_id='seed', updated_at=t0 - timedelta(seconds=5)))
+    db_session.commit()
+    evaluate_alerts(now=t0)
+    fired = {alert['rule_id']: alert for alert in evaluate_alerts(now=t0 + sustain)}
+    assert fired['payment_failure_rate']['status'] == 'FIRING'
+    assert fired['payment_failure_rate']['details']['settled_attempts'] == 24 and fired['payment_failure_rate']['details']['failed'] == 20
+    assert fired['payment_failure_rate']['details']['value'] == round(20 / 24, 4)
+    later = t0 + timedelta(seconds=get_settings().metrics_window_seconds + 30)
+    assert [alert['status'] for alert in evaluate_alerts(now=later) if alert['rule_id'] == 'payment_failure_rate'] == ['RESOLVED']
