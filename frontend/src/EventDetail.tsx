@@ -277,8 +277,22 @@ export default function EventDetail({
             return;
           }
           if (frame.type === "heartbeat") {
-            if (version.current >= 0 && frame.version !== version.current)
-              void snapshot();
+            // The server reports the version it has already published. If we
+            // are behind, the frame may still be in flight: give it one second
+            // (plus jitter so 2,000 viewers do not refetch at the same instant)
+            // and resync only if it has not arrived by then.
+            if (version.current >= 0 && frame.version > version.current) {
+              const expected = frame.version;
+              setTimeout(
+                () => {
+                  if (alive.current && version.current < expected) {
+                    setSynced(false);
+                    void snapshot();
+                  }
+                },
+                1000 + Math.random() * 1000,
+              );
+            }
             return;
           }
           if (frame.type === "seat_changed") {

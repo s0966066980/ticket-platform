@@ -106,15 +106,22 @@ def authenticate_subscriber(token: str, event_id: UUID) -> tuple[Principal, int]
     with new_session() as session:
         principal = authenticate_token(session, token)
         get_event(session, event_id, principal)
-        version = session.scalar(select(EventStream.current_version).where(EventStream.event_id == event_id))
+        version = session.scalar(select(EventStream.published_version).where(EventStream.event_id == event_id))
         if version is None:
             raise AppError(500, 'EVENT_STREAM_MISSING', 'Activity state is incomplete')
         return principal, version
 
 
 def read_version(event_id: UUID) -> int | None:
+    """The version a subscriber could have received: what the worker has already handed to Redis.
+
+    ``current_version`` may be ahead by the Outbox poll interval; reporting it in
+    heartbeats would make every client resync spuriously while a frame is still
+    on its way. A frame a client missed has, by definition, been published, so
+    ``published_version`` still exposes real gaps.
+    """
     with new_session() as session:
-        return session.scalar(select(EventStream.current_version).where(EventStream.event_id == event_id))
+        return session.scalar(select(EventStream.published_version).where(EventStream.event_id == event_id))
 
 
 def eligible_token_hashes(hashes: set[str]) -> set[str]:
