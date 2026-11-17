@@ -67,9 +67,11 @@ def emit_seat_changes(session: Session, event_id: UUID, changes: list[dict], req
                         SELECT gen_random_uuid(), 'seat_changed', :event_id, :version, CAST(:payload AS jsonb), :request_id, clock_timestamp(), 0, 0, clock_timestamp() FROM ok RETURNING id)
         SELECT count(*) FROM audit"""), {'event_id': event_id, 'version': version, 'payload': json.dumps(payload, separators=(',', ':')), 'request_id': request_id})
     if not inserted:
-        if require_on_sale:
-            raise AppError(409, 'NOT_ON_SALE', 'This activity is not currently accepting new orders')
-        raise AppError(404, 'NOT_FOUND', 'Activity not found')
+        # Failure path only: tell a concurrent soft delete (404) apart from an
+        # activity that merely stopped selling (409).
+        if session.scalar(text('SELECT 1 FROM events WHERE id = :event_id AND deleted_at IS NULL'), {'event_id': event_id}) is None:
+            raise AppError(404, 'NOT_FOUND', 'Activity not found')
+        raise AppError(409, 'NOT_ON_SALE', 'This activity is not currently accepting new orders')
     return payload
 
 
