@@ -11,6 +11,7 @@ from uuid import UUID
 import httpx
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import Principal
@@ -113,10 +114,10 @@ def initiate_payment(session: Session, principal: Principal, order_id: UUID, out
         if exc.code == 'IDEMPOTENCY_IN_PROGRESS':
             raise
         return reject_key(claim, exc, request_id)
-    except Exception:
+    except SQLAlchemyError as exc:
         session.rollback()
         release_key(claim)
-        raise
+        raise AppError(503, 'DATABASE_UNAVAILABLE', 'Payment could not be started; retry with the same key') from exc
 
 
 def _queue_reversal(session: Session, payment: Payment, now, reason: str) -> None:
