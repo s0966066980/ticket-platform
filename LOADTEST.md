@@ -11,7 +11,7 @@
 | 容器 | Docker 29.9.1，Compose v5.6.0；受測系統為 `docker-compose.yml` + `docker-compose.load.yml`（獨立專案 `ticket-load`，port 8081，乾淨 volume） |
 | 受測配置 | `API_WORKERS=4`（4 個 uvicorn 程序，各 40 執行緒）、PostgreSQL 16 `max_connections=300`、連線池 20+20／程序、`DATABASE_POOL_TIMEOUT_SECONDS=5`、Nginx 1 worker／core、65,536 fd |
 | 負載產生器 | 同一台機器上的 Locust 2.47（單一程序）與 `websockets` 17；因此結果是「負載產生器與受測系統共用 20 核」的保守數字 |
-| 程式版本 | commit `__COMMIT__`（`integration/mvp`） |
+| 程式版本 | commit `39c5b66`（`integration/mvp`） |
 
 限制：同機壓測使客戶端與伺服器互相搶 CPU；`p50/p95/p99` 以客戶端（Locust）觀測為準，包含 Nginx 排隊與網路時間，伺服器端 API 處理時間另記於 `access_logs`。
 
@@ -19,7 +19,7 @@
 
 設定：`scripts/generate_load_data.py booking` 直接以 SQL 建立 3,000 個帳號與一個 10,000 席已發布活動；`prepare_sessions.py` 先完成 3,000 次登入；Locust 以 100 users/s 啟動，待全部 3,000 人就緒後**重設統計**再量測 60 秒穩態。每人反覆「訂 1 張（70% 區域配位、30% 指定座位）→ 付款成功」，思考時間 50–200 ms，受真實的每人 4 張限購約束。
 
-### 最終結果（commit `__COMMIT__`，2026-11-17 01:37 UTC）
+### 最終結果（commit `39c5b66`，2026-11-17 01:37 UTC）
 
 | 端點 | 請求數 | 失敗 | p50 | p95 | p99 | max | req/s |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -53,7 +53,22 @@
 
 設定：`loadtests/websocket_benchmark.py`，2,000 條經 Nginx 的 WebSocket 連線以同一 Viewer 身分完成應用層 token 握手並取得同一份 HTTP 快照；另一帳號在 60 秒穩態期間反覆「保留一席 → 取消」產生真實座位變更。每次變更量測「HTTP 請求送出 → 各連線收到對應版本的 frame」的客戶端延遲（nearest-rank 百分位），檢查版本連續、重同步次數與斷線。
 
-__SCENARIO_B__
+### 結果（commit 39c5b66，2026-11-17 01:50 UTC；`loadtests/results/final/websocket.json`，逐筆送達紀錄 `websocket.deliveries.jsonl`）
+
+| 指標 | 值 |
+| --- | --- |
+| 建立並通過應用層認證的連線 | 2,000 / 2,000（量測前全部就緒，結束前仍全部存活） |
+| 穩態時間 | 60.4 秒 |
+| 座位變更次數（保留／取消交替） | 78 |
+| 每次變更在 10 秒內送達全部 2,000 條連線 | 78 / 78；單次最慢 0.33 秒 |
+| 送達樣本數 | 156,000 |
+| 送達延遲（HTTP 送出 → 收到 frame） | p50 255 ms、p95 313 ms、p99 324 ms |
+| 版本跳號／重同步 | 0；收到 frame 180,000（含每 5 秒 heartbeat） |
+| 斷線、慢連線淘汰、錯誤 | 0 |
+
+延遲組成：購票 API 處理（含版本鎖）約數十 ms，worker 以 0.25 秒輪詢 Outbox 後 PUBLISH（平均等待約 125 ms），Redis → 4 個 API 程序 → 2,000 條連線的扇出在數十 ms 內完成；因此 p50 約 255 ms 主要是輪詢間隔，可用更短的 `OUTBOX_POLL_SECONDS` 換取延遲，代價是 worker 空轉查詢。
+
+第一次執行（commit d7a9698）在第 26 次變更失敗：2,000 條連線同時重同步。原因是 heartbeat 回報的是 `current_version`，而座位變更提交到 worker 發布之間有最多 0.25 秒的窗口，落在窗口內的 heartbeat 會讓客戶端誤判漏事件。修正為回報 `published_version`（客戶端真正可能漏掉的只有已發布的版本），前端另加 1–2 秒寬限與抖動，重跑即通過。API 容器在 2,000 條連線下的記憶體未由此 harness 記錄，不列數字。
 
 ## 批次匯入：100,000 列 60 秒內完成
 
