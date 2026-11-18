@@ -1,23 +1,21 @@
-## Q1 座位不超賣
+## Q1　座位不超賣
 
-### 1. 「指定座位購買」從 API 到提交的路徑
+<a id="sec-4"></a>
 
-入口 `POST /api/v1/events/{event_id}/bookings`（`backend/app/api/bookings.py:32-40`）→ `reserve_order`（`backend/app/booking.py:194`）→ `_reserve`（`backend/app/booking.py:137`）。一次 HTTP 請求對應一個 PostgreSQL 交易（READ COMMITTED），流程與保護點如下：
+### Q1.1 指定座位：完整路徑、取得與釋放保護的精確位置
 
-| 步驟 | 位置 | 動作 | 保護 |
-| --- | --- | --- | --- |
-| 1 | `booking.py:198-200` | `claim_key`：在獨立短交易以 `INSERT … ON CONFLICT DO NOTHING` 取得冪等處理資格（`idempotency.py:52-95`） | 唯一鍵 `(user_id, operation, key)`；同 key 只會有一個處理者 |
-| 2 | `booking.py:140` | `lock_claim`：主交易 `SELECT … FOR UPDATE` 冪等列並驗證 generation | **保護開始**：冪等列鎖 |
-| 3 | `booking.py:140` | `lock_quota`：`INSERT … ON CONFLICT DO NOTHING` 後 `FOR UPDATE` 該帳號／活動額度列 | 同帳號同活動的所有建單／取消／付款在此序列化 |
-| 4 | `booking.py:144` | 指定座位 `SELECT … FOR UPDATE`（依 ID 排序） | 座位列鎖：競爭同座位的交易在此排隊；固定排序避免死結 |
-| 5 | `booking.py:162-170` | 讀 `clock_timestamp()`，檢查已發布且在售票時段、座位可售（AVAILABLE 或已逾時 HELD）、有效張數 + 本次 ≤ 4 | 在持有鎖的狀態下讀到的是最新提交值（READ COMMITTED + `populate_existing`） |
-| 6 | `booking.py:174-180` | 建立訂單，**條件式 UPDATE** 座位：`WHERE id IN … AND (AVAILABLE OR (HELD AND held_until <= now))` 改為 HELD；受影響列數必須等於張數 | 即使步驟 4 的鎖有任何疏漏，資料庫仍只會更新仍可售的列 |
-| 7 | `booking.py:185-186` | 回應 body 與冪等回應先準備好，`emit_seat_changes`（`booking.py:45-76`）是交易的最後一步 | 進版本鎖前所有待寫入都已 flush（`booking.py:57`） |
-| 8 | `booking.py:58` | `UPDATE event_streams … RETURNING current_version`：取得活動版本列鎖並配號 | 版本配號與軟刪除共用的最後一把鎖；每個活動的提交在此序列化 |
-| 9 | `booking.py:64-75` | 單一 CTE 在鎖下以新快照重讀活動（已刪除、未發布或不在售票時段則不寫入），寫入 `seat_events` 與 `outbox_events`；寫入 0 列即拋錯回滾 | 刪除與建單只能一邊成功 |
-| 10 | `booking.py:190` | `session.commit()` | **保護釋放**：所有列鎖在提交時釋放 |
+1. **路由與輸入限制**：`POST /api/v1/events/{event_id}/bookings` 驗證 Bearer `require_buyer`、`Idempotency-Key`、所選座位為不重複的 1–4 個 UUID；進入 `reserve_order`。參照 [api/bookings.py L14–L36](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/api/bookings.py#L14-L36)。
+2. **先領冪等主張**：`reserve_order` 呼叫 `claim_key`；`idempotency_keys` 唯一索引使相同請求無法同時被當成全新業務操作；主張先獨立提交，此處**還沒有鎖住座位**。[idempotency.py L47–L63](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/idempotency.py#L47-L63)、[booking.py L180–L202](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L180-L202)。
+3. **取得同人限購保護**：`_reserve` L127 → `lock_quota` 先建立 `(user_id,event_id)` 唯一記錄，隨後 `SELECT ... FOR UPDATE`；**L21 是 quota 保護開始的實際 SQL 位置**。[booking.py L19–L21](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L19-L21)、[L124–L127](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L124-L127)。
+4. **取得指定座位保護**：`_reserve` **L131 `SELECT Seat ... ORDER BY Seat.id FOR UPDATE`**，PostgreSQL 在該查詢取得座位列鎖；排定鎖定順序降低死鎖風險。其他交易要操作同一座位必須等待或衝突；不是 Redis 分散式鎖。[booking.py L128–L133](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L128-L133)。
+5. **鎖內驗證並寫入**：取資料庫現在時間 `db_now`（L149）；核對上架／售票期間（L151）、座位 `AVAILABLE` 或已過期 `HELD`（L153–154）、已付款＋有效保留額度（L155–157）；產生 PENDING_PAYMENT 訂單，服務費 5% 四捨五入（L160–163）。**L165 條件式 `UPDATE Seat ... WHERE _eligible(now)`，L166–167 校驗更新數量**，是第二重防線；訂單明細 L168–171。[booking.py L149–L171](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L149-L171)。
+6. **提交一致狀態**：將冪等完成結果寫入同交易（L173），座位變更寫入 `seat_events`、Outbox，並遞增 `event_streams.current_version`（[L39–L69](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L39-L69)）；**`session.commit()` L177 是保護成功釋放的位置**。失敗由 `session.rollback()` **L192／L197** 釋放 SQL transaction locks（PostgreSQL 自動於 transaction 結束釋放），回傳錯誤或重試。[booking.py L165–L202](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L165-L202)。
+7. **之後付款確認**：付款回呼再鎖 quota／order／seat，檢查訂單仍屬於當前座位擁有者與未過期才轉 `SOLD`；過期後收到成功回呼不會再把已重新配位座位賣給舊單，而是走退款補償。[payments.py L140–L210](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/payments.py#L140-L210)。
 
-保護機制：PostgreSQL 列鎖（`FOR UPDATE`）序列化對同一座位、同一帳號額度、同一活動版本的寫入；條件式 UPDATE 的 `WHERE` 子句是最後防線——它只會把「此刻仍可售」的列改成 HELD，更新列數不足就整筆回滾。保證的是：任一座位在任一時刻最多屬於一筆有效訂單（`seats.current_order_id`），且成交明細有 `UNIQUE(seat_id) WHERE sold_at IS NOT NULL`（`backend/app/models.py:162-180`）作為成交層的防線。
+**保證範圍**：保證同一 PostgreSQL 資料庫、正常約束及交易機制下，不會因並行購票同時提交兩筆有效占用；不保證外部金流永不發生重複扣款、不保證前端永遠顯示最新狀態，也不代替資料庫遺失／誤關約束時的保護。條件式更新與同人 quota 鎖共同維持資料完整性。
+
+<a id="sec-5"></a>
+
 
 ### 2. 最可能讓同座位賣兩次的故障順序
 
