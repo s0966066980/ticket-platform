@@ -1,46 +1,33 @@
 # AI 使用說明
 
-本專案由兩個 AI 編碼代理在使用者監督下完成：設計訪談與前三分之二的實作由 OpenAI Codex 進行（2026-11-16 至 11-17 凌晨），其後由 Anthropic Claude Code（Claude Fable 5.1）接手整合、補齊付款／即時推送／監控、執行壓測與撰寫交付文件（2026-11-17）。所有決策由使用者在設計訪談（`docs/design-interview.md` Q1–Q18）與接手時的六項決議中確認。
+目前我的專案主要由兩個 AI 編碼代理在使用者監督下完成：設計主要框架由Codex來進行，後續程式碼修改與測試由Claude Code接手整合、補齊付款／即時推送／監控、執行壓測與撰寫交付文件。
 
-## 使用了哪些 AI 工具、用在哪些部分
+## 說明你使用了哪些 AI 工具、用在哪些部分
 
 | 工具 | 用途 |
 | --- | --- |
-| OpenAI Codex（CLI，多個子代理並行） | 需求澄清訪談、`GLOSSARY.md`／ADR、`docs/implementation-plan.md`、`docs/core-schema.md`、票單圖；票單 01–07、10、12、13 的原始碼與測試（基礎架構、認證、活動、購票交易、匯入、報表、壓測腳本、GitHub Actions） |
-| Claude Code（Claude Fable 5.1，主代理 + 兩個子代理） | 接手盤點與整合；票單 08 付款與模擬金流、14 監控管線、09 即時推送與 worker；效能瓶頸分析與修正；本機 compose 端到端驗證；壓測執行；`DESIGN.md`、`LOADTEST.md`、`AI_USAGE.md`、架構圖、README 補完 |
-| GitHub Actions（PostgreSQL 16 + Redis 7 service containers） | 由 AI 撰寫的 CI，在 Codex 工作階段沒有 Docker socket 時提供唯一的真實執行證據 |
+| OpenAI Codex| 需求確認、`GLOSSARY.md`／ADR、`docs/implementation-plan.md`、`docs/core-schema.md`、票單圖；基礎架構、認證、活動、購票交易、匯入、報表、壓測腳本 |
+| Claude Code | 接手整合；付款與模擬金流、監控管線、即時推送；效能瓶頸分析與修正；本機 compose 端到端驗證；壓測執行 |
 
-工作方式：每張票在獨立 git worktree／分支上以 TDD 於公開介面（HTTP、WebSocket、CLI、匯出檔）寫測試，合併前合入 `integration/mvp` 最新內容並重跑全部測試；合併者只以實際執行結果結案。壓測數字、故障實驗輸出與測試輸出均來自真實執行，文件中註明 commit 與時間。
 
-## AI 產生的程式碼有誤之處（實際發現的案例）
+## 列出**至少 3 處 AI 產生的程式碼有誤**的地方，以及你如何發現、如何修正
 
-以下皆為實際發生、有測試或實際執行可重現的錯誤，依發現時間排列。「發現方式」欄說明是由自動化測試、程式審查或實際執行暴露。
+1. **大範圍文字替換把畫面引用插進 Auth 元件，造成 `ReferenceError`。**
+發現：公開介面測試失敗。  修正：改為限定範圍的替換，測試轉綠。
+2. **登出在 `finally` 無條件清除本機登入狀態，伺服器登出失敗或斷線時使用者仍被登出，憑證卻未撤銷。**
+發現：新增「登出未獲伺服器確認時保留登入並顯示可重試錯誤」的介面測試先失敗。  修正：只在伺服器確認後清除，失敗時保留 session 並顯示錯誤。
+3. **Admin：防重複請求的狀態範圍太大。**
+發現：指標請求尚未完成時，共用旗標仍為 true；此時切到使用者分頁，載入函式會直接返回。指標完成後也不會自動補發使用者請求。這是把「同一分頁避免重複載入」誤做成「所有分頁互相阻擋」。。  修正：改為各分頁獨立旗標。
+4. **DB 時鐘校準同步跑在請求交接路徑上（連線逾時 5 秒）**，DB不可用時觸發校準的請求可能被拖慢。
+發現： middleware 會等待 handoff 完成。即使使用 thread pool，請求仍在等待結果。DB 無法連線時，校準可能受到 5 秒連線逾時拖累。  修正：校準移到背景執行緒，請求路徑只讀錨點。
+5. **Redis 失敗時把退避時間歸零**，Redis 停機期間每個請求都重新嘗試連線。
+發現：例外分支執行 config_until = 0，使下一次交接一定符合「現在已超過探測時間」，再次連線。持續故障時，就反覆探測。現在改為保留五秒探測間隔，失敗時清除可用狀態。  修正：耐久性探測固定每 5 秒重試一次。
+6. **回應 JSON 解析只捕捉 `ValueError`，陣列型 body 會在中介軟體內丟 `AttributeError`。把「合法 JSON」錯當成「JSON 物件」**
+發現：直接使用 json.loads(body).get('code')。[] 能成功解析，因此不會拋 ValueError；但解析結果是 list，呼叫 .get() 才拋 AttributeError。舊版又對所有 JSON 回應做解析，所以成功的陣列回應也可能觸發。  修正：擴大例外處理，且只對 4xx 緩衝 body。
+7. **存取事件在最後一個 body chunk 送出前就交接**，把交接延遲增加了使用者等待時間。
+發現：草稿先 await record()，才 await send(message)；因此 Redis 或本機落盤交接會延後最後一段回應送出。  修正：送出後才記錄。
 
-### 前端（Codex，票單 02，commit 73378de 之前）
-
-1. **大範圍文字替換把畫面引用插進 Auth 元件，造成 `ReferenceError`。** 發現：公開介面測試失敗。修正：改為限定範圍的替換，測試轉綠。
-2. **登出在 `finally` 無條件清除本機登入狀態，伺服器登出失敗或斷線時使用者仍被登出，憑證卻未撤銷。** 發現：新增「登出未獲伺服器確認時保留登入並顯示可重試錯誤」的介面測試先失敗。修正：只在伺服器確認後清除，失敗時保留 session 並顯示錯誤（`frontend/src/App.test.tsx`）。
-3. **初始 HTTP 座位快照可能覆蓋 WebSocket 已套用的較新快照。** 發現：程式審查。修正：以版本比較守衛（`frontend/src/EventDetail.tsx`），不宣稱有量測到實際故障。
-4. **Admin 後台用單一全域 in-flight 旗標，指標載入中會跳過使用者分頁的載入。** 發現：程式審查。修正：改為各分頁獨立旗標。
-
-### 付款與模擬金流（Codex 草稿 bd48da8，由 Claude 子代理接手完成）
-
-5. **`initiate_payment` 用 `except Exception` 把所有 SQLAlchemy 失敗變成 500 INTERNAL_ERROR**，違反設計中「可重試基礎設施錯誤回 503 並保留冪等 key」的合約（`booking.reserve_order` 有正確處理）。發現：對照 `backend/app/booking.py` 的錯誤路徑審查。修正：捕捉 `SQLAlchemyError`、回滾、`release_key`、回 503 `DATABASE_UNAVAILABLE`。
-6. **沖正工作完成時無條件寫入 `payment.status='REVERSED'` 與 `reversed_at`**，金流已沖正但 backend 遺失確認、租約被接手重放時會覆寫時間並可能覆蓋其他狀態。發現：撰寫「provider 已沖正但 backend 未確認時重試」測試（`backend/tests/test_payments.py::test_worker_reverses_late_payment_idempotently_through_gateway`）。修正：只在 `REVERSAL_PENDING` 時轉移。
-
-### 監控管線（Codex 草稿 8887ac7，由 Claude 子代理接手完成）
-
-7. **路由模板取 `scope['route'].path`，在 FastAPI 0.163 的 `_IncludedRouter` 下是相對路徑（`/admin/users`），遺失 `/api/v1` 前綴**，造成指標按路由彙總錯誤。發現：第一個 spool 測試斷言 `route_template == '/api/v1/admin/users'` 失敗。修正：由請求路徑與 `path_params` 還原模板。
-8. **DB 時鐘校準同步跑在請求交接路徑上（連線逾時 5 秒）**，DB 不可用時每個請求都會被拖慢。發現：程式審查。修正：校準移到背景執行緒，請求路徑只讀錨點。
-9. **Redis 失敗時把退避時間歸零**，Redis 停機期間每個請求都重新嘗試連線（各 ≥0.2 秒）。發現：程式審查。修正：耐久性探測固定每 5 秒重試一次。
-10. **回應 JSON 解析只捕捉 `ValueError`，陣列型 body 會在中介軟體內丟 `AttributeError`。** 發現：程式審查。修正：擴大例外處理，且只對 4xx 緩衝 body。
-11. **存取事件在最後一個 body chunk 送出前就交接**，把交接延遲算進使用者回應時間。發現：程式審查。修正：送出後才記錄。
-12. **`_trace()` 延遲載入 `app.main`，worker 程序第一次寫服務日誌時會建構整個 FastAPI 應用。** 修正：只在 `app.main` 已載入時取用 request_id。
-13. **使用已棄用的 `@app.on_event`。** 修正：包裝 `app.router.lifespan_context`。
-14. **文件字串承諾的 `refresh_metrics`、`evaluate_alerts`、CLI 與 admin router 根本不存在**，草稿自己的測試以 404 取代 401 失敗。修正：實作補齊，測試改為 23 個公開介面測試。
-15. **`connection_delta` 在 async 程式碼內直接做 Redis／fsync I/O。** 修正：交接移到 daemon 執行緒。
-
-### 即時推送與 worker（Claude 主代理，票單 09）
+### 即時推送與 worker
 
 16. **呼叫 `app.add_event_handler('shutdown', …)` 註冊 feed hub 的關閉處理**，但該方法在 FastAPI 0.163／Starlette 1.10 已移除，所有 WebSocket 訂閱在握手後立刻斷線。發現：`backend/tests/test_feed.py` 第一輪執行即失敗（`AttributeError: 'FastAPI' object has no attribute 'add_event_handler'`）。修正：改為附加到 `app.router.on_shutdown`（存在時）。
 17. **`run_once()` 先執行 Outbox 發布、再執行逾時收斂**，單一週期內逾時產生的座位事件要等下一週期才發布。發現：`backend/tests/test_worker.py::test_one_worker_cycle_expires_due_holds_and_publishes_their_events` 斷言 `unpublished == 0` 失敗（實際 1）。修正：工作群組順序改為發布最後執行。
@@ -55,7 +42,9 @@
 
 ## 如何避免 AI 錯誤進入交付
 
-- 每個模組先有公開介面測試，再有實作；草稿程式一律視為未驗證。
-- 合併者重跑整個測試套件與 compose 端到端煙霧測試，不信任子代理的口頭回報。
-- 故意破壞保護機制的實驗只在隔離的工作樹與拋棄式資料庫進行，取得失敗輸出後還原（見 `DESIGN.md` Q1）。
+- 每個模組先有公開介面測試，再有實作；草稿程式一律視為未驗證，避免混入。
+- 合併後需要重跑整個測試套件與 compose 端到端的測試，子代理的口頭回報需要作測試查證。
+- 故意破壞保護機制的實驗只在隔離的工作樹與拋棄式資料庫進行，取得失敗輸出後還原。
 - 所有數字（壓測、記憶體、恢復時間）均保留原始輸出於 `loadtests/results/`，未執行的項目在 `README.md` 與 `LOADTEST.md` 如實標示。
+- 每項工作必須嚴格根據goal.md
+- 交叉使用主流AI模型比對檢查
