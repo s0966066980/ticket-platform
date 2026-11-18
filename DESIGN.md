@@ -1,20 +1,3 @@
-# DESIGN：設計問答、假設、替代方案與驗證
-
-所有檔案行號對應 `main` 上的程式（最後一次程式變更為 commit `60c9a40`；之後只有文件 commit，不改變行號）。壓測數字來自 `LOADTEST.md` 所記錄的實際執行；本文件不含未執行的數字。
-
-## 設計假設、替代方案與取捨總覽
-
-| 主題 | 採用 | 替代方案 | 取捨 | 驗證方式 |
-| --- | --- | --- | --- | --- |
-| 座位狀態真實來源 | PostgreSQL 單一交易：列鎖 + 條件式 UPDATE | Redis `SETNX` 鎖位、應用程式記憶體鎖 | 放棄 Redis 的低延遲，換取崩潰後不需要對帳；Redis 只做扇出 | `backend/tests/test_booking.py`、故意移除保護的失敗輸出（Q1） |
-| 限購 | 每帳號／活動一列 `user_event_quotas` 作交易互斥，額度以權威訂單即時求和 | 累加計數器欄位 | 多一次 SUM 查詢，換取逾時訂單自動歸還額度、無計數器漂移 | `test_concurrent_different_keys_cannot_exceed_account_quota` |
-| 事件順序 | 活動版本列在交易內遞增；worker 依版本序發布 | 以 sequence／Redis Stream ID 當順序 | 每活動一段序列化的提交區段，換取「版本缺口 = 漏事件」的簡單規則 | `test_subscriber_receives_committed_changes_in_version_order`、情境 B |
-| 推送通道 | Outbox → Redis Pub/Sub（at-most-once）+ 5 秒 DB 版本核對 | Redis Streams 消費者群組推送 | 不追求通道可靠，靠版本核對與快照重取恢復 | `test_logged_out_subscriber_is_disconnected_by_periodic_verification`、kill -9 實驗 |
-| 慢速客戶端 | 每連線 256 frames 有界佇列，滿則斷線重同步 | 無界佇列／丟棄中間事件 | 犧牲該客戶端一次重連，換取 API 記憶體有上限與版本規則不被破壞 | `test_slow_subscriber_overflow_closes_with_resync_code` |
-| 憑證失效 | 每請求查 DB（session + `auth_version`），不做正向快取 | JWT + 黑名單、快取 TTL | 每請求多約 0.5 ms DB 時間，換取撤銷立即生效 | Q5 量測、`test_role_change_or_disable_revokes_all_existing_tokens_immediately` |
-| 模擬金流 | 獨立程序、持久化、簽章回呼、worker 經 Outbox 呼叫 | API 內同步模擬 | 多一個服務，換取能真實測試回呼遺失、晚到付款與沖正 | `backend/tests/test_payments.py`（25 個） |
-| 監控 | API 中介軟體量測 → Redis Streams → PG 落地後 XACK；每秒每來源桶 | Prometheus pull | 自建管線成本，換取需求要求的「每秒指標與日誌入庫」與 request_id 關聯 | `backend/tests/test_observability.py`（23 個） |
-
 ## Q1 座位不超賣
 
 ### 1. 「指定座位購買」從 API 到提交的路徑
