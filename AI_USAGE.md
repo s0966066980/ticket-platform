@@ -26,19 +26,8 @@
 發現：直接使用 json.loads(body).get('code')。[] 能成功解析，因此不會拋 ValueError；但解析結果是 list，呼叫 .get() 才拋 AttributeError。舊版又對所有 JSON 回應做解析，所以成功的陣列回應也可能觸發。  修正：擴大例外處理，且只對 4xx 緩衝 body。
 7. **存取事件在最後一個 body chunk 送出前就交接**，把交接延遲增加了使用者等待時間。
 發現：草稿先 await record()，才 await send(message)；因此 Redis 或本機落盤交接會延後最後一段回應送出。  修正：送出後才記錄。
-
-### 即時推送與 worker
-
-16. **呼叫 `app.add_event_handler('shutdown', …)` 註冊 feed hub 的關閉處理**，但該方法在 FastAPI 0.163／Starlette 1.10 已移除，所有 WebSocket 訂閱在握手後立刻斷線。發現：`backend/tests/test_feed.py` 第一輪執行即失敗（`AttributeError: 'FastAPI' object has no attribute 'add_event_handler'`）。修正：改為附加到 `app.router.on_shutdown`（存在時）。
-17. **`run_once()` 先執行 Outbox 發布、再執行逾時收斂**，單一週期內逾時產生的座位事件要等下一週期才發布。發現：`backend/tests/test_worker.py::test_one_worker_cycle_expires_due_holds_and_publishes_their_events` 斷言 `unpublished == 0` 失敗（實際 1）。修正：工作群組順序改為發布最後執行。
-18. **慢速訂閱者的關閉依賴 pump 自己讀到結束標記**，但卡在 `send_text` 的 pump 永遠讀不到。發現：以永不讀取的假 WebSocket 寫溢位測試時推理出來，重構為取消 pump task。
-
-### 效能相關（由壓測暴露，非單一行錯誤）
-
-19. **購票交易把活動事件版本列的鎖取在所有檢查之前**（Codex 依設計文件實作，設計本身也如此寫），使所有被拒絕的請求（限購、座位不可用）也要排隊等同一把鎖。發現：第一次情境 A 壓測完成的購票請求上限約 90/s、62% 客戶端逾時。修正：把所有拒絕判斷與座位條件式更新移到版本鎖之前，版本鎖只保護版本遞增與刪除競爭（`backend/app/booking.py:162-190`），並以刪除／購票競爭測試確認語意不變。壓測前後數字見 `LOADTEST.md`。
-
-20. **縮短版本區段的重構把「活動已被刪除」與「不在售票時段」合併成同一個 409。** 刪除／購票競爭測試在重複執行時偶發 `(204, 409)` 而非預期的 `(204, 404)`：安全性未受影響（訂單仍回滾），但狀態碼錯誤。發現：`test_deletion_and_first_booking_cannot_both_succeed` 連續執行 6 次中失敗 2 次。修正：只在寫入 0 列的失敗路徑補一次 `deleted_at` 查詢以區分 404 與 409（`backend/app/booking.py:70-75`），再連跑 8 次全部通過。
-21. **壓測 harness 的 `limited_api.py` 以 `uvicorn --workers 1` 啟動**，uvicorn 因而成為 supervisor、由子程序處理匯出，基準測試量到的是錯誤的程序（RSS 2.3 MB、`single_process=false`）。發現：第一次 500K 匯出結果的 `enforced_address_space_hard_limit_bytes=-1`。修正：不帶 `--workers`，單一程序直接承受 `RLIMIT_AS`。
+8. **購票交易把活動事件版本列的鎖取在所有檢查之前**（Codex 依設計文件實作，設計本身也如此寫），使所有被拒絕的請求（限購、座位不可用）也要排隊等同一把鎖。
+發現：第一次情境 A 壓測完成的購票請求上限約 90/s、62% 客戶端逾時。  修正：把所有拒絕判斷與座位條件式更新移到版本鎖之前，版本鎖只保護版本遞增與刪除競爭，並以刪除／購票競爭測試確認語意不變。
 
 ## 如何避免 AI 錯誤進入交付
 
