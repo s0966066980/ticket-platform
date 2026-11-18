@@ -1,36 +1,40 @@
 ## Q1　座位不超賣
 
-<a id="sec-4"></a>
+### 1. 指定座位購買的完整流程，在哪裡取得及釋放保護？
 
-### Q1.1 指定座位：完整路徑、取得與釋放保護的精確位置
+我把「確認座位可售」和「將座位保留給訂單」放在同一個資料庫交易裡。流程如下，檔案位置皆以 `backend/app/` 為起點：
 
-1. **路由與輸入限制**：`POST /api/v1/events/{event_id}/bookings` 驗證 Bearer `require_buyer`、`Idempotency-Key`、所選座位為不重複的 1–4 個 UUID；進入 `reserve_order`。參照 [api/bookings.py L14–L36](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/api/bookings.py#L14-L36)。
-2. **先領冪等主張**：`reserve_order` 呼叫 `claim_key`；`idempotency_keys` 唯一索引使相同請求無法同時被當成全新業務操作；主張先獨立提交，此處**還沒有鎖住座位**。[idempotency.py L47–L63](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/idempotency.py#L47-L63)、[booking.py L180–L202](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L180-L202)。
-3. **取得同人限購保護**：`_reserve` L127 → `lock_quota` 先建立 `(user_id,event_id)` 唯一記錄，隨後 `SELECT ... FOR UPDATE`；**L21 是 quota 保護開始的實際 SQL 位置**。[booking.py L19–L21](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L19-L21)、[L124–L127](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L124-L127)。
-4. **取得指定座位保護**：`_reserve` **L131 `SELECT Seat ... ORDER BY Seat.id FOR UPDATE`**，PostgreSQL 在該查詢取得座位列鎖；排定鎖定順序降低死鎖風險。其他交易要操作同一座位必須等待或衝突；不是 Redis 分散式鎖。[booking.py L128–L133](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L128-L133)。
-5. **鎖內驗證並寫入**：取資料庫現在時間 `db_now`（L149）；核對上架／售票期間（L151）、座位 `AVAILABLE` 或已過期 `HELD`（L153–154）、已付款＋有效保留額度（L155–157）；產生 PENDING_PAYMENT 訂單，服務費 5% 四捨五入（L160–163）。**L165 條件式 `UPDATE Seat ... WHERE _eligible(now)`，L166–167 校驗更新數量**，是第二重防線；訂單明細 L168–171。[booking.py L149–L171](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L149-L171)。
-6. **提交一致狀態**：將冪等完成結果寫入同交易（L173），座位變更寫入 `seat_events`、Outbox，並遞增 `event_streams.current_version`（[L39–L69](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L39-L69)）；**`session.commit()` L177 是保護成功釋放的位置**。失敗由 `session.rollback()` **L192／L197** 釋放 SQL transaction locks（PostgreSQL 自動於 transaction 結束釋放），回傳錯誤或重試。[booking.py L165–L202](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/booking.py#L165-L202)。
-7. **之後付款確認**：付款回呼再鎖 quota／order／seat，檢查訂單仍屬於當前座位擁有者與未過期才轉 `SOLD`；過期後收到成功回呼不會再把已重新配位座位賣給舊單，而是走退款補償。[payments.py L140–L210](https://github.com/s0966066980/ticket-platform/blob/main/backend/app/payments.py#L140-L210)。
+| 步驟 | 處理內容 | 程式位置 |
+| --- | --- | --- |
+| 1 | API 驗證使用者及輸入，呼叫 `reserve_order` | `api/bookings.py:32–40`、`booking.py:194` |
+| 2 | 以使用者、操作類型和 idempotency key 取得處理資格，避免同一請求重複建單 | `booking.py:198–200`、`idempotency.py:52–95` |
+| 3 | 主交易鎖住冪等紀錄並確認 generation，接著鎖住同帳號、同活動的額度紀錄 | `booking.py:140` |
+| 4 | 按座位 ID 排序，以 `SELECT ... FOR UPDATE` 鎖住指定座位 | `booking.py:144` |
+| 5 | 取得資料庫時間，檢查售票期間、座位是否可售，以及目前有效票數加上本次是否超過 4 張 | `booking.py:162–170` |
+| 6 | 建立訂單，以條件式 UPDATE 將仍可售的座位改成 HELD；更新張數不符就整筆回滾 | `booking.py:174–180` |
+| 7 | 保存冪等回應、遞增活動版本，寫入座位事件與 Outbox | `booking.py:185–189`、`booking.py:45–76` |
+| 8 | 提交交易並釋放鎖 | `booking.py:190` |
 
-**保證範圍**：保證同一 PostgreSQL 資料庫、正常約束及交易機制下，不會因並行購票同時提交兩筆有效占用；不保證外部金流永不發生重複扣款、不保證前端永遠顯示最新狀態，也不代替資料庫遺失／誤關約束時的保護。條件式更新與同人 quota 鎖共同維持資料完整性。
+具體來說，主交易的冪等與額度保護從 `booking.py:140` 開始，座位保護從 `booking.py:144` 開始。成功時在 `booking.py:190` 提交後釋放；中途發生錯誤則透過回滾釋放。
 
-<a id="sec-5"></a>
+這樣兩個人同時搶同一席時，後取得鎖的人必須等前一筆交易結束，再依最新狀態判斷。條件式 UPDATE 是另一道保護，即使前面的讀取有疏漏，也不能直接覆蓋已被占用的座位。成交明細另有針對已售座位的唯一限制，位置在 `models.py:162–180`。
 
+這些保護確保同一座位不會同時屬於兩筆有效訂單。前端畫面可能有延遲，但是否能購買仍由這個交易決定。
 
-### 2. 最可能讓同座位賣兩次的故障順序
+### 2. 哪一種故障順序最容易造成重複售出？
 
-情境：兩個 API 副本 A、B 同時收到不同帳號對同一座位的請求；A 在取得座位鎖後、提交前程序被暫停（例如 GC 停頓、容器被 `SIGSTOP`）超過鎖位期限不可能（期限 5 分鐘），但更危險的是 **A 的連線在提交後才逾時**，客戶端以相同 key 重送到 B：
+我會特別注意「舊訂單逾時清理」和「新訂單重新占位」同時發生的情況。這比單純兩個人同時搶票更容易漏掉，因為清理工作可能很晚才執行。
 
-| 時間 | A（副本 1） | B（副本 2） | 資料庫 |
-| --- | --- | --- | --- |
-| t0 | 取得冪等列、額度列、座位 S 的鎖 | 同 key 重送：`claim_key` 看到 IN_PROGRESS 且租約未到 → 回 409 IDEMPOTENCY_IN_PROGRESS | S 鎖在 A |
-| t1 | 條件式 UPDATE S → HELD；commit 成功，但回應在網路上遺失 | | S.current_order_id = 訂單 A |
-| t2 | | 客戶端再以同 key 重送：`claim_key` 看到 COMPLETED → 重播原 201 與原訂單（`idempotency.py:74`） | 不再建立 |
-| t2' | | 若改用**不同帳號**的請求：取得 S 的鎖後讀到 HELD 且 `held_until > now` → 409 SEAT_UNAVAILABLE（`booking.py:166-167`）；就算檢查被繞過，條件式 UPDATE 影響 0 列 → 409（`booking.py:179`） | S 不變 |
+1. A 的訂單保留座位 S，但一直沒有付款。
+2. worker 查到 A 是待清理的候選訂單，接著暫停。
+3. 保留期限過後，B 取得 S 的鎖，確認可以重新保留，將座位歸屬改成 B 並提交。
+4. 舊 worker 恢復執行，準備釋放 A 的座位。
+5. 如果這時只用座位 ID 更新，就會把 B 的有效座位釋放，讓 C 也有機會訂到。
 
-另一個順序：A 在 t0 取得鎖後被暫停 30 秒。B 在座位鎖上等待（不會超時，PostgreSQL 無 lock timeout 設定），A 恢復後提交，B 才取得鎖並讀到最新狀態 → 拒絕。如果 A 的連線被資料庫斷掉（例如 `kill -9` A），交易回滾、鎖釋放，B 正常成立；A 的冪等列租約 30 秒後到期可被重試接手（generation +1，`idempotency.py:89`），舊處理者若還活著，`lock_claim` 會因 generation 不符而拒絕（`idempotency.py:99`）。我找不到在這個實作下能讓兩筆有效訂單指向同一座位的交錯；條件式 UPDATE 的列數檢查是獨立於鎖的第二道保證。
+我的釋放條件會同時檢查 `current_order_id` 仍然是 A，而且狀態仍是 HELD，位置是 `backend/app/booking.py:249`。座位已屬於 B 時就不更新，因此舊工作不會清掉新訂單的保留。
 
-擋不住的情況（誠實列出）：若有人直接以 SQL 繞過服務層更新 `seats`，或移除 `current_order_id` 的複合外鍵。這些不是請求路徑能到達的狀態。
+如果 A 的付款成功回呼之後才到，也必須重新檢查訂單期限和座位歸屬；不能完成原訂單時改走沖正，不能把座位從 B 手上拿回來。這是故障順序的推演，並非這次重新執行的故障注入結果。
+
 
 ### 3. 併發測試與故意破壞的輸出
 
